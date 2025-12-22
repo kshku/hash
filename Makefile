@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS ?= -Wall -Wextra -O2 -std=gnu99
-TARGET = hash
+TARGET = hash-shell
 SRC_DIR = src
 BUILD_DIR = build
 TEST_DIR = tests
@@ -66,7 +66,6 @@ help:
 test-setup:
 	@if [ ! -d "$(UNITY_DIR)" ]; then \
 		echo "Setting up Unity test framework..."; \
-		chmod +x $(TEST_DIR)/setup_unity.sh; \
 		$(TEST_DIR)/setup_unity.sh; \
 	else \
 		echo "Unity already set up. Run 'make test-clean' to remove and reinstall."; \

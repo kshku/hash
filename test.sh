@@ -3,7 +3,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-HASH_BIN="./hash"
+HASH_BIN="./hash-shell"
 TEST_DIR="test_output"
 PASSED=0
 FAILED=0
@@ -39,7 +39,7 @@ run_test() {
     # Run command in hash shell
     local output=$(echo "$command\nexit" | timeout 2 "$HASH_BIN" 2>&1)
 
-    if echo "$output" | grep -q "$expected"; then
+    if echo "$output" | grep -qF "$expected"; then
         echo -e "${GREEN}PASS${NC}"
         ((PASSED++))
         return 0
@@ -120,6 +120,13 @@ run_test "cd with no args" "cd" "No such file or directory"
 echo -e "\n${YELLOW}Edge Cases:${NC}"
 run_command_test "empty command" ""
 run_command_test "whitespace only" "   "
+
+echo -e "\n${YELLOW}Quote Handling:${NC}"
+run_test "double quotes" "echo \"hello world\"" "hello world"
+run_test "single quotes" "echo 'hello world'" "hello world"
+run_test "escaped double quote" "echo \"He said \\\"hello\\\"\"" 'He said "hello"'
+run_test "escaped backslash" "echo \"path\\\\to\\\\file\"" "path\\to\\file"
+run_test "mixed quotes" "echo \"double\" 'single'" "double"
 
 echo -e "\n${YELLOW}File Operations:${NC}"
 # TODO: This will pass with I/O redirection

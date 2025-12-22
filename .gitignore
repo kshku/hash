@@ -54,4 +54,7 @@ dkms.conf
 # debug information files
 *.dwo
 
-hash
+hash-shell
+tests/unity.h
+tests/unity
+build
