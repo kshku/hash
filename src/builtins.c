@@ -2,12 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pwd.h>
+#include <sys/types.h>
 #include "hash.h"
 #include "builtins.h"
 #include "colors.h"
 #include "config.h"
 #include "execute.h"
-#include "safe_string.h"
 
 extern int last_command_exit_code;
 
@@ -33,17 +34,35 @@ static int num_builtins(void) {
 
 // Built-in: cd
 int shell_cd(char **args) {
-    if (args[1] == NULL) {
-        color_error("%s: expected argument to \"cd\"", HASH_NAME);
-        last_command_exit_code = 1;
-    } else {
-        if (chdir(args[1]) != 0) {
-            perror(HASH_NAME);
-            last_command_exit_code = 1;
-        } else {
-            last_command_exit_code = 0;
+    const char *path = args[1];
+
+    // If no argument, go to home directory
+    if (path == NULL) {
+        path = getenv("HOME");
+
+        if (!path) {
+            // Use getpwuid_r for thread safety
+            struct passwd pw;
+            struct passwd *result = NULL;
+            char buf[1024];
+
+            if (getpwuid_r(getuid(), &pw, buf, sizeof(buf), &result) == 0 && result != NULL) {
+                path = pw.pw_dir;
+            } else {
+                color_error("%s: could not determine home directory", HASH_NAME);
+                last_command_exit_code = 1;
+                return 1;
+            }
         }
     }
+
+    if (chdir(path) != 0) {
+        perror(HASH_NAME);
+        last_command_exit_code = 1;
+    } else {
+        last_command_exit_code = 0;
+    }
+
     return 1;
 }
 
@@ -78,8 +97,8 @@ int shell_alias(char **args) {
 
         // Remove quotes if present
         if ((value[0] == '"' || value[0] == '\'') &&
-            value[0] == value[safe_strlen(value, sizeof(value)) - 1]) {
-            value[safe_strlen(value, sizeof(value)) - 1] = '\0';
+            value[0] == value[strlen(value) - 1]) {
+            value[strlen(value) - 1] = '\0';
             value++;
         }
 
