@@ -19,6 +19,7 @@ Julio Jimenez, julio@julioj.com
 #include "prompt.h"
 #include "chain.h"
 #include "lineedit.h"
+#include "history.h"
 
 // Signal handler for cleanup
 static void signal_handler(int sig) {
@@ -38,9 +39,21 @@ static void loop(void) {
 
         line = read_line(prompt_str);
 
+        history_reset_position();
+
+        // Expand history references
+        char *expanded = history_expand(line);
+        if (expanded) {
+            printf("%s\n", expanded);
+            free(line);
+            line = expanded;
+        }
+
         CommandChain *chain = chain_parse(line);
 
         if (chain) {
+            history_add(line);
+
             // Execute the chain
             status = chain_execute(chain);
 
@@ -74,6 +87,9 @@ int main(/*int argc, char **argv*/) {
 
     // Initialize prompt system
     prompt_init();
+
+    // Initialize history (loads from ~/.hash_history)
+    history_init();
 
     // Load .hashrc if it exists
     config_load_default();
