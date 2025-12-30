@@ -13,18 +13,18 @@ Command line interpreter (shell) for the Linux operating system.
 #### Linux x86_64
 
 ```bash
-curl -LO https://github.com/juliojimenez/hash/releases/download/v0.0.8/hash-shell-v0.0.8-x86_64
-chmod +x hash-shell-v0.0.8-x86_64
-sudo mv hash-shell-v0.0.8-x86_64 /usr/local/bin/hash-shell
+curl -LO https://github.com/juliojimenez/hash/releases/download/v9/hash-shell-v9-x86_64
+chmod +x hash-shell-v9-x86_64
+sudo mv hash-shell-v9-x86_64 /usr/local/bin/hash-shell
 hash-shell
 ```
 
 #### Linux ARM64
 
 ```bash
-curl -LO https://github.com/juliojimenez/hash/releases/download/v0.0.8/hash-shell-v0.0.8-aarch64
-chmod +x hash-shell-v0.0.8-aarch64
-sudo mv hash-shell-v0.0.8-aarch64 /usr/local/bin/hash-shell
+curl -LO https://github.com/juliojimenez/hash/releases/download/v9/hash-shell-v9-aarch64
+chmod +x hash-shell-v9-aarch64
+sudo mv hash-shell-v9-aarch64 /usr/local/bin/hash-shell
 hash-shell
 ```
 
@@ -75,6 +75,8 @@ sudo usermod -s /usr/local/bin/hash-shell your_username
 - [Tilde Expansion](./docs/EXPANSION.md)
 - [Command History](./docs/HISTORY.md)
   - [HISTCONTROL](./docs/HISTCONTROL.md)
+- [Tab Completion](./docs/TAB_COMPLETION.md)
+  - [Tab Completion Quick Reference](./docs/COMPLETION_QUICKREF.md)
 - [Safe String Utilities](./docs/SAFE_STRING.md)
 - [Testing](./docs/TESTING.md)
 

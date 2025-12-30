@@ -6,10 +6,12 @@
 #include <unistd.h>
 #include <termios.h>
 #include <ctype.h>
+#include <sys/ioctl.h>
 #include "lineedit.h"
 #include "hash.h"
 #include "safe_string.h"
 #include "history.h"
+#include "completion.h"
 
 #define MAX_LINE_LENGTH 4096
 
@@ -136,6 +138,15 @@ static int read_key(void) {
     return c;
 }
 
+// Get terminal width
+static int get_terminal_width(void) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1) {
+        return 80;  // Default fallback
+    }
+    return ws.ws_col;
+}
+
 // Calculate visible length of prompt (excluding ANSI escape sequences)
 static size_t visible_prompt_length(const char *prompt) {
     if (!prompt) return 0;
@@ -199,6 +210,7 @@ void lineedit_cleanup(void) {
 // Read a line with editing capabilities
 char *lineedit_read_line(const char *prompt) {
     static char buf[MAX_LINE_LENGTH];
+    static int last_was_tab = 0;
     size_t len = 0;
     size_t pos = 0;
     ssize_t ret;
@@ -350,6 +362,7 @@ char *lineedit_read_line(const char *prompt) {
                 break;
 
             case KEY_CTRL_A:  // Beginning
+                last_was_tab = 0;
                 while (pos > 0) {
                     pos--;
                     ret = write(STDOUT_FILENO, "\x1b[D", 3);
@@ -358,6 +371,7 @@ char *lineedit_read_line(const char *prompt) {
                 break;
 
             case KEY_CTRL_E:  // End
+                last_was_tab = 0;
                 while (pos < len) {
                     pos++;
                     ret = write(STDOUT_FILENO, "\x1b[C", 3);
@@ -366,6 +380,7 @@ char *lineedit_read_line(const char *prompt) {
                 break;
 
             case KEY_CTRL_U:  // Delete to beginning
+                last_was_tab = 0;
                 if (pos > 0) {
                     memmove(buf, buf + pos, len - pos);
                     len -= pos;
@@ -376,12 +391,14 @@ char *lineedit_read_line(const char *prompt) {
                 break;
 
             case KEY_CTRL_K:  // Delete to end
+                last_was_tab = 0;
                 len = pos;
                 buf[len] = '\0';
                 refresh_line(buf, len, pos, prompt_str);
                 break;
 
             case KEY_CTRL_W:  // Delete word backward
+                last_was_tab = 0;
                 if (pos > 0) {
                     size_t old_pos = pos;
 
@@ -401,28 +418,152 @@ char *lineedit_read_line(const char *prompt) {
                 break;
 
             case KEY_CTRL_L:  // Clear screen
+                last_was_tab = 0;
                 ret = write(STDOUT_FILENO, "\x1b[H\x1b[2J", 7);
                 (void)ret;
                 refresh_line(buf, len, pos, prompt_str);
                 break;
 
             case KEY_TAB:
-                if (len < MAX_LINE_LENGTH - 4) {
-                    const char *spaces = "    ";
-                    size_t spaces_len = 4;
+                {
+                    // Generate completions
+                    CompletionResult *comp = completion_generate(buf, pos);
 
-                    if (len + spaces_len < MAX_LINE_LENGTH) {
-                        memmove(buf + pos + spaces_len, buf + pos, len - pos);
-                        memcpy(buf + pos, spaces, spaces_len);
-                        pos += spaces_len;
-                        len += spaces_len;
-                        buf[len] = '\0';
-                        refresh_line(buf, len, pos, prompt_str);
+                    if (comp && comp->count > 0) {
+                        if (comp->count == 1) {
+                            // Single match - complete it
+                            // Find start of word being completed
+                            size_t word_start = pos;
+                            while (word_start > 0 && !isspace(buf[word_start - 1])) {
+                                word_start--;
+                            }
+
+                            // Remove old word
+                            memmove(buf + word_start, buf + pos, len - pos);
+                            len -= (pos - word_start);
+                            pos = word_start;
+
+                            // Insert completion
+                            const char *match = comp->matches[0];
+                            size_t match_len = strlen(match);
+
+                            if (len + match_len < MAX_LINE_LENGTH) {
+                                memmove(buf + pos + match_len, buf + pos, len - pos);
+                                memcpy(buf + pos, match, match_len);
+                                pos += match_len;
+                                len += match_len;
+                                buf[len] = '\0';
+
+                                // Add space after completion
+                                if (len < MAX_LINE_LENGTH - 1) {
+                                    memmove(buf + pos + 1, buf + pos, len - pos);
+                                    buf[pos] = ' ';
+                                    pos++;
+                                    len++;
+                                    buf[len] = '\0';
+                                }
+
+                                refresh_line(buf, len, pos, prompt_str);
+                            }
+
+                            last_was_tab = 0;
+                        } else {
+                            // Multiple matches
+                            if (last_was_tab) {
+                                // Second TAB - show all matches
+                                ret = write(STDOUT_FILENO, "\r\n", 2);
+                                (void)ret;
+
+                                // Calculate column layout
+                                int term_width = get_terminal_width();
+                                size_t max_len = 0;
+
+                                // Find longest match
+                                for (int i = 0; i < comp->count; i++) {
+                                    size_t len = strlen(comp->matches[i]);
+                                    if (len > max_len) max_len = len;
+                                }
+
+                                // Add 2 spaces padding between columns
+                                size_t col_width = max_len + 2;
+                                int cols_per_row = term_width / col_width;
+                                if (cols_per_row < 1) cols_per_row = 1;
+
+                                // Display matches in columns
+                                for (int i = 0; i < comp->count; i++) {
+                                    ret = write(STDOUT_FILENO, comp->matches[i], strlen(comp->matches[i]));
+                                    (void)ret;
+
+                                    // Add padding to align columns
+                                    size_t match_len = strlen(comp->matches[i]);
+                                    if ((i + 1) % cols_per_row != 0 && i < comp->count - 1) {
+                                        // Not end of row, add padding
+                                        for (size_t pad = 0; pad < col_width - match_len; pad++) {
+                                            ret = write(STDOUT_FILENO, " ", 1);
+                                            (void)ret;
+                                        }
+                                    } else {
+                                        // End of row or last item
+                                        ret = write(STDOUT_FILENO, "\r\n", 2);
+                                        (void)ret;
+                                    }
+                                }
+
+                                // Ensure we end with newline
+                                if (comp->count % cols_per_row != 0) {
+                                    ret = write(STDOUT_FILENO, "\r\n", 2);
+                                    (void)ret;
+                                }
+
+                                // Redraw prompt and line
+                                refresh_line(buf, len, pos, prompt_str);
+                                last_was_tab = 0;
+                            } else {
+                                // First TAB - complete common prefix
+                                if (comp->common_prefix) {
+                                    size_t word_start = pos;
+                                    while (word_start > 0 && !isspace(buf[word_start - 1])) {
+                                        word_start--;
+                                    }
+
+                                    size_t prefix_len = strlen(comp->common_prefix);
+                                    size_t current_word_len = pos - word_start;
+
+                                    // Only insert if common prefix is longer than current word
+                                    if (prefix_len > current_word_len) {
+                                        // Remove current word
+                                        memmove(buf + word_start, buf + pos, len - pos);
+                                        len -= (pos - word_start);
+                                        pos = word_start;
+
+                                        // Insert common prefix
+                                        if (len + prefix_len < MAX_LINE_LENGTH) {
+                                            memmove(buf + pos + prefix_len, buf + pos, len - pos);
+                                            memcpy(buf + pos, comp->common_prefix, prefix_len);
+                                            pos += prefix_len;
+                                            len += prefix_len;
+                                            buf[len] = '\0';
+                                            refresh_line(buf, len, pos, prompt_str);
+                                        }
+                                    }
+                                }
+                                last_was_tab = 1;
+                            }
+                        }
+                    } else {
+                        // No matches - beep
+                        ret = write(STDOUT_FILENO, "\a", 1);
+                        (void)ret;
+                        last_was_tab = 0;
                     }
+
+                    completion_free_result(comp);
                 }
                 break;
 
             default:
+                // Regular character - reset tab tracking
+                last_was_tab = 0;
                 if (c >= 32 && c < 127 && len < MAX_LINE_LENGTH - 1) {
                     memmove(buf + pos + 1, buf + pos, len - pos);
                     buf[pos] = c;
