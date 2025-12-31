@@ -330,8 +330,6 @@ char *lineedit_read_line(const char *prompt) {
                     const char *prev = history_prev();
                     if (prev) {
                         // Clear current line and load history entry
-                        len = 0;
-                        pos = 0;
                         safe_strcpy(buf, prev, sizeof(buf));
                         len = safe_strlen(buf, sizeof(buf));
                         pos = len;
@@ -345,8 +343,6 @@ char *lineedit_read_line(const char *prompt) {
                     const char *next = history_next();
                     if (next) {
                         // Load next history entry
-                        len = 0;
-                        pos = 0;
                         safe_strcpy(buf, next, sizeof(buf));
                         len = safe_strlen(buf, sizeof(buf));
                         pos = len;
@@ -480,8 +476,8 @@ char *lineedit_read_line(const char *prompt) {
 
                                 // Find longest match
                                 for (int i = 0; i < comp->count; i++) {
-                                    size_t len = strlen(comp->matches[i]);
-                                    if (len > max_len) max_len = len;
+                                    size_t mlen = strlen(comp->matches[i]);
+                                    if (mlen > max_len) max_len = mlen;
                                 }
 
                                 // Add 2 spaces padding between columns
@@ -566,7 +562,7 @@ char *lineedit_read_line(const char *prompt) {
                 last_was_tab = 0;
                 if (c >= 32 && c < 127 && len < MAX_LINE_LENGTH - 1) {
                     memmove(buf + pos + 1, buf + pos, len - pos);
-                    buf[pos] = c;
+                    buf[pos] = (char)c;
                     pos++;
                     len++;
                     buf[len] = '\0';
