@@ -13,18 +13,18 @@ Command line interpreter (shell) for the Linux operating system.
 #### Linux x86_64
 
 ```bash
-curl -LO https://github.com/juliojimenez/hash/releases/download/v13/hash-shell-v13-x86_64
-chmod +x hash-shell-v13-x86_64
-sudo mv hash-shell-v13-x86_64 /usr/local/bin/hash-shell
+curl -LO https://github.com/juliojimenez/hash/releases/download/v14/hash-shell-v14-x86_64
+chmod +x hash-shell-v14-x86_64
+sudo mv hash-shell-v14-x86_64 /usr/local/bin/hash-shell
 hash-shell
 ```
 
 #### Linux ARM64
 
 ```bash
-curl -LO https://github.com/juliojimenez/hash/releases/download/v13/hash-shell-v13-aarch64
-chmod +x hash-shell-v13-aarch64
-sudo mv hash-shell-v13-aarch64 /usr/local/bin/hash-shell
+curl -LO https://github.com/juliojimenez/hash/releases/download/v14/hash-shell-v14-aarch64
+chmod +x hash-shell-v14-aarch64
+sudo mv hash-shell-v14-aarch64 /usr/local/bin/hash-shell
 hash-shell
 ```
 
@@ -81,6 +81,7 @@ sudo usermod -s /usr/local/bin/hash-shell your_username
   - [HISTCONTROL](./docs/HISTCONTROL.md)
 - [Tab Completion](./docs/TAB_COMPLETION.md)
   - [Tab Completion Quick Reference](./docs/COMPLETION_QUICKREF.md)
+- [Login Shells](./docs/LOGIN_SHELL.md)
 - [Safe String Utilities](./docs/SAFE_STRING.md)
 - [Testing](./docs/TESTING.md)
 - [Code of Conduct](CODE_OF_CONDUCT.md)
