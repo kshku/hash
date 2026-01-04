@@ -47,7 +47,7 @@ export HISTCONTROL=ignoreboth
 # set PS1='\W #> '
 
 # Simple with git: Absolute path and git status
-set PS1='\w\g \e#>\e '
+set PS1='\w\g \e#>\e'
 
 # ============================================================================
 # ENVIRONMENT VARIABLES
@@ -62,9 +62,7 @@ export EDITOR=vim
 # Set your preferred pager
 export PAGER=less
 
-# PATH manipulation now works!
-# export PATH=$HOME/bin:$PATH
-# (Uncomment if you have ~/bin directory)
+export PATH=$HOME/bin:/usr/local/bin:$HOME/go/bin:$PATH
 
 # Note: Tilde expansion is also supported
 # You can use ~ in aliases and commands
@@ -74,28 +72,24 @@ export PAGER=less
 # ALIASES
 # ============================================================================
 
-# Navigation shortcuts
-alias ..='cd ..'
-alias ...='cd ../..'
-alias ....='cd ../../..'
-
 # ls variations
 alias ll='ls -lah'
 alias la='ls -A'
 alias l='ls -CF'
 
-# Safety nets
-alias rm='rm -i'
-alias cp='cp -i'
-alias mv='mv -i'
-
 # Git shortcuts
-alias gs='git status'
+# Git shortcuts
 alias ga='git add'
-alias gc='git commit'
-alias gp='git push'
-alias gl='git log --oneline'
+alias gb='git branch'
+alias gc='git commit -m'
+alias gcssm='git commit --gpg-sign --signoff --message'
+alias gcb='git checkout -b'
 alias gd='git diff'
+alias gl='git log --oneline'
+alias gp='git push'
+alias gpl='git pull'
+alias gpo='git push origin'
+alias gs='git status'
 
 # Docker shortcuts (if you use Docker)
 # alias dps='docker ps'
@@ -114,11 +108,6 @@ alias cpuinfo='lscpu'
 
 # Network
 alias myip='curl ifconfig.me'
-alias ping='ping -c 5'
-
-# File operations
-alias grep='grep --color=auto'
-alias mkdir='mkdir -pv'
 
 # Development shortcuts
 alias py='python3'
@@ -127,11 +116,4 @@ alias serve='python3 -m http.server'
 # Quick edits
 alias vimrc='vim ~/.vimrc'
 alias hashrc='vim ~/.hashrc'
-
-# ============================================================================
-# CUSTOM ALIASES
-# ============================================================================
-
-# Add your custom aliases here
-# alias myproject='cd ~/projects/myproject'
-# alias update='sudo apt update && sudo apt upgrade'
+alias shashrc='source ~/.hashrc'
