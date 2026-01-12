@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include "chain.h"
 #include "parser.h"
 #include "execute.h"
@@ -12,6 +13,9 @@
 #include "pipeline.h"
 #include "jobs.h"
 #include "hash.h"
+#include "script.h"
+#include "trap.h"
+#include "config.h"
 
 #define INITIAL_CHAIN_CAPACITY 8
 
@@ -103,6 +107,8 @@ CommandChain *chain_parse(char *line) {
     char *cmd_start = line;
     int in_single_quote = 0;
     int in_double_quote = 0;
+    int paren_depth = 0;  // Track $() and $(()), () depth
+    int brace_depth = 0;  // Track {} brace groups
     int escaped = 0;
 
     while (*current) {
@@ -126,8 +132,41 @@ CommandChain *chain_parse(char *line) {
             in_double_quote = !in_double_quote;
         }
 
-        // Look for operators outside quotes
+        // Track (), $() and $(()) depth when not in single quotes
+        // Need to track both subshells () and command substitutions $()
         if (!in_single_quote && !in_double_quote) {
+            if (*current == '(') {
+                paren_depth++;
+            } else if (*current == ')' && paren_depth > 0) {
+                paren_depth--;
+            }
+            // Track brace groups { }
+            if (*current == '{') {
+                brace_depth++;
+            } else if (*current == '}' && brace_depth > 0) {
+                brace_depth--;
+            }
+        } else if (!in_single_quote && in_double_quote) {
+            // Inside double quotes, only track $()
+            if (*current == '$' && *(current + 1) == '(') {
+                paren_depth++;
+                current += 2;  // Skip past $(
+                continue;
+            } else if (*current == ')' && paren_depth > 0) {
+                paren_depth--;
+            }
+        }
+
+        // Look for operators outside quotes, command substitution, and brace groups
+        if (!in_single_quote && !in_double_quote && paren_depth == 0 && brace_depth == 0) {
+            // Check for comment - # starts a comment that extends to end of line
+            // Must be preceded by whitespace or be at start of command
+            if (*current == '#' && (current == cmd_start || isspace(*(current - 1)))) {
+                // Terminate the line at the comment
+                *current = '\0';
+                break;  // Exit the parsing loop
+            }
+
             ChainOp op = CHAIN_NONE;
             int op_len = 0;
 
@@ -135,6 +174,31 @@ CommandChain *chain_parse(char *line) {
             if (*current == '&' && *(current + 1) == '&') {
                 op = CHAIN_AND;
                 op_len = 2;
+            }
+            // Check for single & (background + continue) - must not be followed by &
+            // and must not be part of >&N or N>&M redirection (where & is preceded by > and/or followed by digit)
+            else if (*current == '&' && *(current + 1) != '&' &&
+                     !(current > cmd_start && *(current - 1) == '>') &&
+                     !isdigit(*(current + 1))) {
+                // Single & acts as separator - command before it runs in background
+                // Null-terminate at & position
+                *current = '\0';
+
+                // Trim whitespace from command
+                safe_trim(cmd_start);
+
+                // Add command to chain if not empty, marked as background
+                if (*cmd_start != '\0') {
+                    if (chain_add(chain, cmd_start, CHAIN_ALWAYS, true) != 0) {
+                        chain_free(chain);
+                        return NULL;
+                    }
+                }
+
+                // Move past &
+                current++;
+                cmd_start = current;
+                continue;
             }
             // Check for ||
             else if (*current == '|' && *(current + 1) == '|') {
@@ -217,6 +281,11 @@ void chain_free(CommandChain *chain) {
 
 // Execute a single command in background
 static int execute_background(const char *cmd_line) {
+    // Flush stdout/stderr before forking to prevent child from inheriting
+    // buffered content that it would then flush on exit
+    fflush(stdout);
+    fflush(stderr);
+
     pid_t pid = fork();
 
     if (pid == -1) {
@@ -230,34 +299,35 @@ static int execute_background(const char *cmd_line) {
         // Create new process group
         setpgid(0, 0);
 
-        // Parse and execute command
-        char *line_copy = strdup(cmd_line);
-        if (!line_copy) exit(EXIT_FAILURE);
-
-        // Check for pipes
-        Pipeline *pipe = pipeline_parse(line_copy);
-
-        if (pipe) {
-            int exit_code = pipeline_execute(pipe);
-            pipeline_free(pipe);
-            free(line_copy);
-            exit(exit_code);
-        } else {
-            char **args = parse_line(line_copy);
-            if (args) {
-                execute(args);
-                free(args);
+        // Redirect stdin from /dev/null to prevent interference with parent's stdin reading
+        // This is critical when the shell is reading from a pipe
+        // Simply closing isn't enough - we need to replace it to avoid fd reuse issues
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            if (devnull != STDIN_FILENO) {
+                close(devnull);
             }
-            free(line_copy);
-            exit(EXIT_SUCCESS);
         }
+
+        // Use script_process_line to handle all command types
+        // (brace groups, subshells, control structures, etc.)
+        extern int last_command_exit_code;
+        script_process_line(cmd_line);
+        fflush(stdout);
+        fflush(stderr);
+        _exit(last_command_exit_code);
     }
 
     // Parent process
-    // Add job to job table
+    // Set the last background PID for $! expansion
+    jobs_set_last_bg_pid(pid);
+
+    // Add job to job table (needed for jobs command and $!)
     int job_id = jobs_add(pid, cmd_line);
 
-    if (job_id > 0) {
+    // Only print job notification in interactive mode with job control
+    if (job_id > 0 && isatty(STDIN_FILENO) && shell_option_monitor()) {
         printf("[%d] %d\n", job_id, pid);
     }
 
@@ -300,8 +370,169 @@ int chain_execute(const CommandChain *chain) {
         char *line_copy = strdup(cmd->cmd_line);
         if (!line_copy) continue;
 
+        // Skip leading whitespace
+        const char *trimmed = line_copy;
+        while (*trimmed && isspace(*trimmed)) trimmed++;
+
+        // Check for pipeline negation: ! command
+        // POSIX: ! inverts the exit status of the pipeline
+        bool negate = false;
+        if (*trimmed == '!' && (isspace(*(trimmed + 1)) || *(trimmed + 1) == '\0')) {
+            negate = true;
+            trimmed++;
+            while (*trimmed && isspace(*trimmed)) trimmed++;
+        }
+
+        // Check for subshell syntax: (commands) [redirections]
+        if (*trimmed == '(') {
+            // Find matching closing paren by tracking depth
+            const char *p = trimmed + 1;
+            int depth = 1;
+            int in_single_quote = 0;
+            int in_double_quote = 0;
+
+            while (*p && depth > 0) {
+                if (*p == '\'' && !in_double_quote) {
+                    in_single_quote = !in_single_quote;
+                } else if (*p == '"' && !in_single_quote) {
+                    in_double_quote = !in_double_quote;
+                } else if (!in_single_quote && !in_double_quote) {
+                    if (*p == '(') depth++;
+                    else if (*p == ')') depth--;
+                }
+                if (depth > 0) p++;
+            }
+
+            if (depth == 0 && *p == ')') {
+                // p points to matching ')'
+                const char *end_paren = p;
+
+                // Extract subshell content
+                size_t len = (size_t)(end_paren - (trimmed + 1));
+                char *subshell_cmd = malloc(len + 1);
+                if (subshell_cmd) {
+                    memcpy(subshell_cmd, trimmed + 1, len);
+                    subshell_cmd[len] = '\0';
+
+                    // Check for redirections after the closing paren
+                    const char *after_paren = end_paren + 1;
+                    while (*after_paren && isspace(*after_paren)) after_paren++;
+                    char *redir_str = NULL;
+                    if (*after_paren) {
+                        redir_str = strdup(after_paren);
+                    }
+
+                    // Flush before fork
+                    fflush(stdout);
+                    fflush(stderr);
+
+                    pid_t pid = fork();
+                    if (pid == 0) {
+                        // Child process - apply external redirections first
+                        if (redir_str) {
+                            char *redir_copy = strdup(redir_str);
+                            if (redir_copy) {
+                                char *r = redir_copy;
+                                while (*r) {
+                                    while (*r && isspace(*r)) r++;
+                                    if (!*r) break;
+
+                                    int fd = -1;
+                                    if (isdigit(*r)) {
+                                        fd = 0;
+                                        while (isdigit(*r)) {
+                                            fd = fd * 10 + (*r - '0');
+                                            r++;
+                                        }
+                                    }
+
+                                    if (*r == '<') {
+                                        r++;
+                                        if (fd < 0) fd = 0;
+                                        if (*r == '&') {
+                                            r++;
+                                            if (*r == '-') { close(fd); r++; }
+                                            else { int src = atoi(r); while (isdigit(*r)) r++; dup2(src, fd); }
+                                        } else {
+                                            while (*r && isspace(*r)) r++;
+                                            char *fn = r;
+                                            while (*r && !isspace(*r)) r++;
+                                            char sv = *r; *r = '\0';
+                                            int nfd = open(fn, O_RDONLY);
+                                            if (nfd >= 0) { if (nfd != fd) { dup2(nfd, fd); close(nfd); } }
+                                            *r = sv;
+                                        }
+                                    } else if (*r == '>') {
+                                        r++;
+                                        if (fd < 0) fd = 1;
+                                        int app = 0;
+                                        if (*r == '>') { app = 1; r++; }
+                                        if (*r == '&') {
+                                            r++;
+                                            if (*r == '-') { close(fd); r++; }
+                                            else { int src = atoi(r); while (isdigit(*r)) r++; dup2(src, fd); }
+                                        } else {
+                                            while (*r && isspace(*r)) r++;
+                                            char *fn = r;
+                                            while (*r && !isspace(*r)) r++;
+                                            char sv = *r; *r = '\0';
+                                            int fl = O_WRONLY | O_CREAT | (app ? O_APPEND : O_TRUNC);
+                                            int nfd = open(fn, fl, 0644);
+                                            if (nfd >= 0) { if (nfd != fd) { dup2(nfd, fd); close(nfd); } }
+                                            *r = sv;
+                                        }
+                                    } else { r++; }
+                                }
+                                free(redir_copy);
+                            }
+                            free(redir_str);
+                        }
+                        trap_reset_for_subshell();
+                        int exit_code = script_execute_string(subshell_cmd);
+                        free(subshell_cmd);
+                        trap_execute_exit();
+                        fflush(stdout);
+                        fflush(stderr);
+                        _exit(exit_code);
+                    } else if (pid > 0) {
+                        // Parent process
+                        free(subshell_cmd);
+                        free(redir_str);
+                        int status;
+                        waitpid(pid, &status, 0);
+                        extern int last_command_exit_code;
+                        if (WIFEXITED(status)) {
+                            last_command_exit_code = WEXITSTATUS(status);
+                        } else {
+                            last_command_exit_code = 1;
+                        }
+                        // Apply negation if needed
+                        if (negate) {
+                            last_command_exit_code = (last_command_exit_code == 0) ? 1 : 0;
+                        }
+                        last_exit_code = last_command_exit_code;
+                    } else {
+                        free(subshell_cmd);
+                        free(redir_str);
+                        last_exit_code = 1;
+                    }
+                }
+                free(line_copy);
+                continue;
+            }
+        }
+
+        // If negation flag is set but no subshell, we need to execute the rest
+        // and negate the exit code
+        // Need to make a copy since pipeline_parse/parse_line may modify the string
+        char *exec_cmd = negate ? strdup(trimmed) : line_copy;
+        if (negate && !exec_cmd) {
+            free(line_copy);
+            continue;
+        }
+
         // Check if this command contains pipes
-        Pipeline *pipe = pipeline_parse(line_copy);
+        Pipeline *pipe = pipeline_parse(exec_cmd);
 
         if (pipe) {
             // Execute as pipeline
@@ -310,15 +541,25 @@ int chain_execute(const CommandChain *chain) {
             // Update global exit code
             extern int last_command_exit_code;
             last_command_exit_code = pipe_exit;
-            last_exit_code = pipe_exit;
+            // Apply negation if needed
+            if (negate) {
+                last_command_exit_code = (last_command_exit_code == 0) ? 1 : 0;
+            }
+            last_exit_code = last_command_exit_code;
 
             pipeline_free(pipe);
         } else {
             // No pipes - execute normally
-            char **args = parse_line(line_copy);
+            char **args = parse_line(exec_cmd);
             if (args) {
                 shell_continue = execute(args);
                 last_exit_code = execute_get_last_exit_code();
+                // Apply negation if needed
+                if (negate) {
+                    extern int last_command_exit_code;
+                    last_command_exit_code = (last_command_exit_code == 0) ? 1 : 0;
+                    last_exit_code = last_command_exit_code;
+                }
 #if DEBUG_EXIT_CODE
                 fprintf(stderr, "DEBUG: chain_execute() after execute, last_exit_code=%d\n", last_exit_code);
 #endif
@@ -326,11 +567,33 @@ int chain_execute(const CommandChain *chain) {
             }
         }
 
+        if (negate) free(exec_cmd);
         free(line_copy);
 
         // If command was "exit", stop processing chain
         if (shell_continue == 0) {
             return 0;
+        }
+
+        // If break or continue was called, stop processing chain
+        if (script_get_break_pending() > 0 || script_get_continue_pending() > 0) {
+            return shell_continue;
+        }
+
+        // Check errexit option: exit if command failed and we're not in a special context
+        // POSIX says errexit should NOT trigger if:
+        // - We're in an if/while/until condition (script_get_in_condition())
+        // - The command is part of a && or || chain being tested (cmd->next_op)
+        // - The command was negated with !
+        if (shell_option_errexit() && last_exit_code != 0 && !negate) {
+            // Don't trigger errexit if command is left side of && or ||
+            if (cmd->next_op != CHAIN_AND && cmd->next_op != CHAIN_OR) {
+                // Don't trigger errexit if in condition context
+                if (!script_get_in_condition()) {
+                    // Errexit triggers - exit the shell
+                    return 0;
+                }
+            }
         }
     }
 

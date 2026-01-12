@@ -14,6 +14,13 @@
 #include "execute.h"
 #include "safe_string.h"
 #include "redirect.h"
+#include "builtins.h"
+#include "varexpand.h"
+#include "expand.h"
+#include "cmdsub.h"
+#include "arith.h"
+
+extern int last_command_exit_code;
 
 #define INITIAL_PIPE_CAPACITY 8
 
@@ -56,6 +63,7 @@ Pipeline *pipeline_parse(char *line) {
     char *cmd_start = line;
     int in_single_quote = 0;
     int in_double_quote = 0;
+    int paren_depth = 0;  // Track $() and $(()) depth
     int escaped = 0;
 
     while (*current) {
@@ -79,8 +87,21 @@ Pipeline *pipeline_parse(char *line) {
             in_double_quote = !in_double_quote;
         }
 
-        // Look for pipe outside quotes
-        if (!in_single_quote && !in_double_quote && *current == '|') {
+        // Track $() and $(()) depth when not in single quotes
+        if (!in_single_quote) {
+            if (*current == '$' && *(current + 1) == '(') {
+                paren_depth++;
+                current += 2;  // Skip past $(
+                continue;
+            } else if (*current == '(' && paren_depth > 0) {
+                paren_depth++;
+            } else if (*current == ')' && paren_depth > 0) {
+                paren_depth--;
+            }
+        }
+
+        // Look for pipe outside quotes and command substitution
+        if (!in_single_quote && !in_double_quote && paren_depth == 0 && *current == '|') {
             // Check if it's || (OR operator) - skip both characters
             if (*(current + 1) == '|') {
                 current += 2;  // Skip both | characters
@@ -190,13 +211,37 @@ int pipeline_execute(const Pipeline *pipeline) {
 
             // Parse and execute command
             char *line_copy = strdup(pipeline->commands[i].cmd_line);
-            if (!line_copy) exit(EXIT_FAILURE);
+            if (!line_copy) _exit(EXIT_FAILURE);
 
             char **args = parse_line(line_copy);
             if (!args) {
                 free(line_copy);
-                exit(EXIT_FAILURE);
+                _exit(EXIT_FAILURE);
             }
+
+            // Perform variable expansion, command substitution, and arithmetic expansion
+            expand_tilde(args);
+            cmdsub_args(args);
+            arith_args(args);
+            varexpand_args(args, last_command_exit_code);
+
+            // Count args for glob expansion
+            int arg_count = 0;
+            while (args[arg_count] != NULL) arg_count++;
+
+            // Glob (pathname) expansion
+            char **glob_args = args;
+            int glob_arg_count = arg_count;
+            expand_glob(&glob_args, &glob_arg_count);
+
+            // Use expanded args if glob expansion happened
+            if (glob_args != args) {
+                free(args);
+                args = glob_args;
+            }
+
+            // Strip quote markers after all expansions
+            strip_quote_markers_args(args);
 
             // Parse redirections
             RedirInfo *redir = redirect_parse(args);
@@ -207,22 +252,30 @@ int pipeline_execute(const Pipeline *pipeline) {
                 redirect_free(redir);
                 free(args);
                 free(line_copy);
-                exit(EXIT_FAILURE);
+                _exit(EXIT_FAILURE);
             }
 
-            // Execute (this will handle expansions, built-ins, etc.)
-            // execute(args);
+            // Try builtin first (handles times, echo, etc. in pipelines)
+            int builtin_result = try_builtin(exec_args);
+            if (builtin_result != -1) {
+                // It was a builtin - flush output and exit with appropriate code
+                fflush(stdout);
+                fflush(stderr);
+                redirect_free(redir);
+                free(args);
+                free(line_copy);
+                _exit(builtin_result == 1 ? 0 : builtin_result);
+            }
 
-            // Execute (this will handle expansions, but not built-ins in pipes)
+            // Not a builtin - execute as external command
             if (execvp(exec_args[0], exec_args) == -1) {
                 perror(HASH_NAME);
             }
 
-            // Should not reach here for built-ins that continue
             redirect_free(redir);
             free(args);
             free(line_copy);
-            exit(EXIT_SUCCESS);
+            _exit(EXIT_FAILURE);
         }
     }
 

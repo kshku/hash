@@ -30,6 +30,8 @@ Julio Jimenez, julio@julioj.com
 #include "jobs.h"
 #include "script.h"
 #include "update.h"
+#include "shellvar.h"
+#include "trap.h"
 
 // Shell process group ID
 static pid_t shell_pgid;
@@ -37,8 +39,7 @@ static pid_t shell_pgid;
 // Track if this is a login shell (needed for logout handling)
 static bool is_login_shell_global = false;
 
-// Track if we're running interactively
-static bool is_interactive = false;
+// is_interactive is defined in config.c
 
 // Signal handler for cleanup
 static void signal_handler(int sig) {
@@ -262,6 +263,15 @@ int main(int argc, char *argv[]) {
     // Initialize scripting subsystem (always needed)
     script_init();
 
+    // Initialize shell variables (readonly, export tracking)
+    shellvar_init();
+
+    // Import environment variables (so they can be modified and synced back)
+    shellvar_sync_from_env();
+
+    // Initialize trap system
+    trap_init();
+
     // Initialize colors
     colors_init();
 
@@ -298,8 +308,15 @@ int main(int argc, char *argv[]) {
     // Non-interactive mode: Execute script file
     // ========================================================================
     if (script_file != NULL) {
+        // If -i flag was used, initialize history for the script
+        if (force_interactive) {
+            history_init();
+        }
+
         int result = script_execute_file(script_file, script_argc, script_argv);
 
+        // Execute EXIT trap before cleanup
+        trap_execute_exit();
         script_cleanup();
         return result;
     }
@@ -327,14 +344,23 @@ int main(int argc, char *argv[]) {
         char line[MAX_LINE];
         script_state.in_script = true;
 
-        while (fgets(line, sizeof(line), stdin)) {
+        int result = 1;
+        while (1) {
+            // Clear buffer before each read to prevent corruption
+            // when lines don't end with newline
+            memset(line, 0, sizeof(line));
+            if (!fgets(line, sizeof(line), stdin)) break;
             // Remove trailing newline
             size_t len = strlen(line);
             if (len > 0 && line[len - 1] == '\n') {
                 line[len - 1] = '\0';
             }
 
-            script_process_line(line);
+            result = script_process_line(line);
+            // Exit if the exit command was called (returns 0)
+            if (result == 0) {
+                break;
+            }
         }
 
         script_state.in_script = false;
@@ -342,10 +368,13 @@ int main(int argc, char *argv[]) {
         // Check for unclosed control structures
         if (script_state.context_depth > 0) {
             fprintf(stderr, "%s: unexpected end of file\n", HASH_NAME);
+            trap_execute_exit();
             script_cleanup();
             return 1;
         }
 
+        // Execute EXIT trap before cleanup
+        trap_execute_exit();
         script_cleanup();
         return execute_get_last_exit_code();
     }
@@ -403,6 +432,9 @@ int main(int argc, char *argv[]) {
     if (is_login_shell_global) {
         config_load_logout_files();
     }
+
+    // Execute EXIT trap
+    trap_execute_exit();
 
     // Cleanup
     lineedit_cleanup();

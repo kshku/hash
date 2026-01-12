@@ -17,12 +17,77 @@
 
 Config shell_config;
 
+// Track if we're running interactively (for history tracking, job control, etc.)
+bool is_interactive = false;
+
 // Initialize config with defaults
 void config_init(void) {
     shell_config.alias_count = 0;
     shell_config.colors_enabled = true;
     shell_config.show_welcome = true;
     memset(shell_config.aliases, 0, sizeof(shell_config.aliases));
+    shell_options_init();
+}
+
+// Initialize shell options to defaults
+void shell_options_init(void) {
+    shell_config.options.nounset = false;
+    shell_config.options.errexit = false;
+    shell_config.options.xtrace = false;
+    shell_config.options.verbose = false;
+    shell_config.options.noclobber = false;
+    shell_config.options.allexport = false;
+    shell_config.options.monitor = false;
+}
+
+// Get the nounset option value
+bool shell_option_nounset(void) {
+    return shell_config.options.nounset;
+}
+
+// Set the nounset option value
+void shell_option_set_nounset(bool value) {
+    shell_config.options.nounset = value;
+}
+
+// Get the errexit option value
+bool shell_option_errexit(void) {
+    return shell_config.options.errexit;
+}
+
+// Set the errexit option value
+void shell_option_set_errexit(bool value) {
+    shell_config.options.errexit = value;
+}
+
+// Get the monitor option value
+bool shell_option_monitor(void) {
+    return shell_config.options.monitor;
+}
+
+// Set the monitor option value
+void shell_option_set_monitor(bool value) {
+    shell_config.options.monitor = value;
+}
+
+// Get the nonlexicalctrl option value
+bool shell_option_nonlexicalctrl(void) {
+    return shell_config.options.nonlexicalctrl;
+}
+
+// Set the nonlexicalctrl option value
+void shell_option_set_nonlexicalctrl(bool value) {
+    shell_config.options.nonlexicalctrl = value;
+}
+
+// Get the nolog option value
+bool shell_option_nolog(void) {
+    return shell_config.options.nolog;
+}
+
+// Set the nolog option value
+void shell_option_set_nolog(bool value) {
+    shell_config.options.nolog = value;
 }
 
 // Trim whitespace from string

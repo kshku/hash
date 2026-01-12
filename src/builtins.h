@@ -81,11 +81,48 @@ int shell_eval(char **args);
 // Built-in command: update - check for and install updates
 int shell_update(char **args);
 
+// Built-in command: command - execute command or describe command type
+int shell_command(char **args);
+
+// Built-in command: exec - replace shell or manage file descriptors
+int shell_exec(char **args);
+
+// Built-in command: times - print shell process times
+int shell_times(char **args);
+
+// Built-in command: type - describe command type (alias for command -V)
+int shell_type(char **args);
+
+// Built-in command: readonly - mark variables as readonly
+int shell_readonly(char **args);
+
+// Built-in command: trap - set signal handlers
+int shell_trap(char **args);
+
+// Built-in command: wait - wait for background jobs
+int shell_wait(char **args);
+
+// Built-in command: kill - send signal to process or job
+int shell_kill(char **args);
+
+// Built-in command: hash - manage command path hash table
+int shell_hash(char **args);
+
+// Add a command to the hash table (called when external commands are executed)
+void cmd_hash_add(const char *name, const char *path);
+
+// Find command in PATH and return full path (caller must free)
+char *find_in_path(const char *cmd);
+
 // Set login shell status (called from main)
 void builtins_set_login_shell(bool is_login);
 
 // Check if command is a built-in and execute it
 // Returns -1 if not a built-in, otherwise returns the result
 int try_builtin(char **args);
+
+// Check if a command name is a built-in (without executing it)
+// Returns true if it's a builtin, false otherwise
+bool is_builtin(const char *cmd);
 
 #endif // BUILTINS_H

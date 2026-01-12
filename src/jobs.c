@@ -17,6 +17,7 @@
 static Job jobs[MAX_JOBS];
 static int next_job_id = 1;
 static int current_job = 0;  // Most recent job
+static pid_t last_bg_pid = 0;  // PID of most recent background job (for $!)
 
 // Initialize job control
 void jobs_init(void) {
@@ -90,6 +91,18 @@ int jobs_remove(int job_id) {
                         break;
                     }
                 }
+            }
+
+            // Check if job table is now empty, reset job ID counter
+            bool table_empty = true;
+            for (int j = 0; j < MAX_JOBS; j++) {
+                if (jobs[j].pid != 0) {
+                    table_empty = false;
+                    break;
+                }
+            }
+            if (table_empty) {
+                next_job_id = 1;
             }
 
             return 0;
@@ -187,7 +200,7 @@ void jobs_check_completed(void) {
 }
 
 // List all jobs
-void jobs_list(void) {
+void jobs_list(JobsFormat format) {
     int found = 0;
 
     for (int i = 0; i < MAX_JOBS; i++) {
@@ -200,23 +213,42 @@ void jobs_list(void) {
                 jobs_update_status(jobs[i].pid, status);
             }
 
-            // Print job info
-            char current_marker = (jobs[i].job_id == current_job) ? '+' : '-';
-
-            color_print(COLOR_CYAN, "[%d]%c ", jobs[i].job_id, current_marker);
-            printf("%-12s  ", state_string(jobs[i].state));
-            printf("%s", jobs[i].command);
-
-            if (jobs[i].state == JOB_RUNNING) {
-                color_print(COLOR_DIM, " &");
-            }
-            printf("\n");
-
             found++;
+
+            // Print based on format
+            if (format == JOBS_FORMAT_PID_ONLY) {
+                // -p: Just print PIDs
+                printf("%d\n", jobs[i].pid);
+            } else {
+                // Default or -l format
+                char current_marker = (jobs[i].job_id == current_job) ? '+' : '-';
+
+                if (format == JOBS_FORMAT_LONG) {
+                    // -l: Include PID
+                    printf("[%d]%c %d %-12s %s",
+                        jobs[i].job_id,
+                        current_marker,
+                        jobs[i].pid,
+                        state_string(jobs[i].state),
+                        jobs[i].command);
+                } else {
+                    // Default format
+                    printf("[%d]%c %-12s %s",
+                        jobs[i].job_id,
+                        current_marker,
+                        state_string(jobs[i].state),
+                        jobs[i].command);
+                }
+
+                if (jobs[i].state == JOB_RUNNING) {
+                    printf(" &");
+                }
+                printf("\n");
+            }
         }
     }
 
-    if (found == 0) {
+    if (found == 0 && format != JOBS_FORMAT_PID_ONLY) {
         printf("No jobs\n");
     }
 }
@@ -400,4 +432,14 @@ void jobs_sigchld_handler(int sig) {
     }
 
     errno = saved_errno;
+}
+
+// Get last background PID (for $!)
+pid_t jobs_get_last_bg_pid(void) {
+    return last_bg_pid;
+}
+
+// Set last background PID
+void jobs_set_last_bg_pid(pid_t pid) {
+    last_bg_pid = pid;
 }

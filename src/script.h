@@ -88,10 +88,26 @@ typedef struct {
     int loop_index;         // Current index in loop
     int loop_count;         // Total number of values
     long loop_body_start;   // File position of loop body start
+    char *loop_body;        // Buffered loop body for replay
+    size_t loop_body_len;   // Current length of loop body
+    size_t loop_body_cap;   // Capacity of loop body buffer
+    bool collecting_body;   // Are we currently collecting loop body?
+    int body_nesting_depth; // Nesting depth of nested loops during collection
+    char *loop_condition;   // Condition for while/until loops
 
     // For case
     char *case_word;        // Word being matched in case statement
     bool case_matched;      // Has a pattern matched?
+
+    // For function definitions
+    char *func_name;        // Function name being defined
+    char *func_body;        // Function body being collected
+    size_t func_body_len;   // Current length of body
+    size_t func_body_cap;   // Capacity of body buffer
+    int brace_depth;        // Brace nesting depth
+
+    // For lexical scoping of break/continue
+    int function_call_depth; // Function call depth when this context was created
 } ScriptContext;
 
 // ============================================================================
@@ -126,6 +142,12 @@ typedef struct {
     // Positional parameters ($1, $2, etc.)
     char **positional_params;
     int positional_count;
+
+    // Function call tracking for lexical scoping
+    int function_call_depth; // Current depth of function calls (0 = not in function)
+
+    // Exit tracking
+    bool exit_requested;     // True if exit was explicitly called
 } ScriptState;
 
 extern ScriptState script_state;
@@ -194,6 +216,31 @@ int script_process_line(const char *line);
  * Check if we're currently inside a control structure
  */
 bool script_in_control_structure(void);
+
+/**
+ * Count loops in the context stack (for POSIX dynamic scoping)
+ * Returns the number of for/while/until loops that can be broken out of
+ * POSIX requires break/continue to work across function boundaries
+ */
+int script_count_loops_at_current_depth(void);
+
+/**
+ * Get/set break pending levels (for POSIX dynamic scoping)
+ * When break is called from a function, these track how many levels to break
+ */
+int script_get_break_pending(void);
+void script_set_break_pending(int levels);
+
+/**
+ * Get/set continue pending levels (for POSIX dynamic scoping)
+ */
+int script_get_continue_pending(void);
+void script_set_continue_pending(int levels);
+
+/**
+ * Clear break/continue pending state (call when fully handled)
+ */
+void script_clear_break_continue(void);
 
 /**
  * Check if commands should currently execute
@@ -314,5 +361,45 @@ typedef enum {
  * Classify a line to determine how to handle it
  */
 LineType script_classify_line(const char *line);
+
+/**
+ * Get a positional parameter value
+ *
+ * @param index Parameter index (0 for $0, 1 for $1, etc.)
+ * @return Parameter value or NULL if not set
+ */
+const char *script_get_positional_param(int index);
+
+/**
+ * Set positional parameters ($1, $2, etc.) from set builtin
+ * Note: $0 is preserved, only $1 onwards are replaced
+ *
+ * @param argc Number of parameters to set
+ * @param argv Array of parameter values (note: these are copied, not owned)
+ */
+void script_set_positional_params(int argc, char **argv);
+
+/**
+ * Get the pending heredoc content
+ * Used during command execution to pass heredoc content to stdin
+ *
+ * @return Heredoc content string, or NULL if none pending
+ */
+const char *script_get_pending_heredoc(void);
+
+/**
+ * Get whether the pending heredoc delimiter was quoted
+ * If quoted, no expansion should happen on the heredoc content
+ *
+ * @return 1 if delimiter was quoted, 0 otherwise
+ */
+int script_get_pending_heredoc_quoted(void);
+
+/**
+ * Track whether we're in a condition context (if/while/until condition)
+ * where errexit should not trigger
+ */
+void script_set_in_condition(bool in_condition);
+bool script_get_in_condition(void);
 
 #endif // SCRIPT_H

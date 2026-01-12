@@ -1,0 +1,311 @@
+name: Smoosh POSIX Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  smoosh-tests:
+    name: Smoosh POSIX Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Hash
+        uses: actions/checkout@v6
+
+      - name: Build Hash Shell
+        run: |
+          make clean
+          make
+          echo "Hash shell built successfully"
+          ./hash-shell -c 'echo "Hash version test"' || true
+
+      - name: Install Hash Shell
+        run: |
+          sudo cp hash-shell /usr/local/bin/hash-shell
+          sudo chmod +x /usr/local/bin/hash-shell
+          which hash-shell
+          hash-shell -c 'echo "Installation verified"' || true
+
+      - name: Clone Smoosh Test Suite
+        run: |
+          git clone --depth 1 https://github.com/mgree/smoosh.git smoosh-tests
+          echo "Smoosh test suite cloned"
+          ls -la smoosh-tests/tests/
+
+          # Build test utilities
+          cd smoosh-tests/tests/util
+          for src in *.c; do
+            bin="${src%.c}"
+            gcc -o "$bin" "$src" 2>/dev/null || echo "Note: Could not build $bin"
+          done
+          ls -la
+
+      - name: Run Smoosh Shell Tests
+        id: smoosh_tests
+        continue-on-error: true
+        run: |
+          set +e  # Don't exit on test failures
+          cd smoosh-tests/tests
+
+          echo "=== Smoosh POSIX Compliance Tests ==="
+          echo ""
+
+          PASSED=0
+          FAILED=0
+          TIMEOUT=0
+          SKIPPED=0
+          TOTAL=0
+
+          # Create results directory
+          mkdir -p results
+
+          # Export TEST_SHELL and TEST_UTIL for tests
+          export TEST_SHELL=/usr/local/bin/hash-shell
+          export TEST_UTIL="$(pwd)/util"
+
+          # Tests to skip (platform-specific issues, known failures)
+          # Format: space-separated list of test names (without .test extension)
+          SKIP_TESTS="
+            builtin.kill.jobs
+            builtin.readonly.assign.interactive
+            builtin.set.quoted
+            builtin.times.ioerror
+            builtin.trap.subshell.false.exit
+            builtin.trap.subshell.loud
+            builtin.trap.subshell.loud2
+            semantics.arith.var.space
+            semantics.backtick.fds
+            semantics.case.escape.modernish
+            semantics.escaping.backslash.modernish
+          "
+
+          # Function to check if test should be skipped
+          should_skip() {
+            local test_name="$1"
+            for skip in $SKIP_TESTS; do
+              if [ "$test_name" = "$skip" ]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          for test_file in shell/*.test; do
+            if [ -f "$test_file" ]; then
+              TOTAL=$((TOTAL + 1))
+              TEST_NAME=$(basename "$test_file" .test)
+
+              # Check if test should be skipped
+              if should_skip "$TEST_NAME"; then
+                echo "SKIP: $TEST_NAME (in skip list)"
+                SKIPPED=$((SKIPPED + 1))
+                continue
+              fi
+
+              # Get expected outputs
+              OUT_FILE="shell/${TEST_NAME}.out"
+              ERR_FILE="shell/${TEST_NAME}.err"
+              EC_FILE="shell/${TEST_NAME}.ec"
+
+              # Run test with timeout (execute as script, not via stdin)
+              timeout 5s /usr/local/bin/hash-shell "$test_file" > "results/${TEST_NAME}.actual_out" 2> "results/${TEST_NAME}.actual_err"
+              ACTUAL_EC=$?
+
+              # Check if timeout occurred
+              if [ $ACTUAL_EC -eq 124 ]; then
+                echo "TIMEOUT: $TEST_NAME"
+                TIMEOUT=$((TIMEOUT + 1))
+                continue
+              fi
+
+              # Compare results
+              TEST_PASSED=true
+
+              # Check exit code if expected file exists
+              if [ -f "$EC_FILE" ]; then
+                EXPECTED_EC=$(cat "$EC_FILE" | tr -d '[:space:]')
+                if [ "$ACTUAL_EC" != "$EXPECTED_EC" ]; then
+                  TEST_PASSED=false
+                fi
+              fi
+
+              # Check stdout if expected file exists
+              if [ -f "$OUT_FILE" ] && [ "$TEST_PASSED" = true ]; then
+                if ! diff -q "results/${TEST_NAME}.actual_out" "$OUT_FILE" > /dev/null 2>&1; then
+                  TEST_PASSED=false
+                fi
+              fi
+
+              # Check stderr if expected file exists
+              if [ -f "$ERR_FILE" ] && [ "$TEST_PASSED" = true ]; then
+                if ! diff -q "results/${TEST_NAME}.actual_err" "$ERR_FILE" > /dev/null 2>&1; then
+                  TEST_PASSED=false
+                fi
+              fi
+
+              if [ "$TEST_PASSED" = true ]; then
+                PASSED=$((PASSED + 1))
+                echo "PASS: $TEST_NAME"
+              else
+                FAILED=$((FAILED + 1))
+                echo "FAIL: $TEST_NAME"
+              fi
+            fi
+          done
+
+          echo ""
+          echo "=== Summary ==="
+          echo "Total:   $TOTAL"
+          echo "Passed:  $PASSED"
+          echo "Failed:  $FAILED"
+          echo "Timeout: $TIMEOUT"
+          echo "Skipped: $SKIPPED"
+
+          if [ $TOTAL -gt 0 ]; then
+            PERCENT=$((PASSED * 100 / TOTAL))
+            echo "Pass Rate: ${PERCENT}%"
+          fi
+
+          # Save summary for artifact
+          echo "Total: $TOTAL" > results/summary.txt
+          echo "Passed: $PASSED" >> results/summary.txt
+          echo "Failed: $FAILED" >> results/summary.txt
+          echo "Timeout: $TIMEOUT" >> results/summary.txt
+          echo "Skipped: $SKIPPED" >> results/summary.txt
+
+          # Set output for later steps
+          echo "results=Passed: $PASSED, Failed: $FAILED, Timeout: $TIMEOUT, Skipped: $SKIPPED" >> $GITHUB_OUTPUT
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoosh-test-results
+          path: |
+            smoosh-tests/tests/results/
+            smoosh-tests/tests/smoosh-results.txt
+          retention-days: 30
+
+      - name: Test Summary
+        run: |
+          echo "=== POSIX Compliance Test Summary ==="
+          if [ -f smoosh-tests/tests/results/summary.txt ]; then
+            cat smoosh-tests/tests/results/summary.txt
+          fi
+          echo ""
+          echo "Note: Hash shell is under active development."
+          echo "Some POSIX features may not yet be implemented."
+          echo "See the uploaded artifacts for detailed test results."
+
+  comparison-tests:
+    name: Compare with Reference Shells
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Hash
+        uses: actions/checkout@v6
+
+      - name: Build Hash Shell
+        run: |
+          make clean
+          make
+          sudo cp hash-shell /usr/local/bin/hash-shell
+
+      - name: Install Reference Shells
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dash
+
+      - name: Clone Smoosh Test Suite
+        run: |
+          git clone --depth 1 https://github.com/mgree/smoosh.git smoosh-tests
+
+      - name: Run Comparison Tests
+        run: |
+          cd smoosh-tests/tests
+
+          echo "=== Shell Comparison ==="
+          echo ""
+
+          # Function to run tests for a shell
+          run_shell_tests() {
+            local SHELL_PATH="$1"
+            local SHELL_NAME="$2"
+
+            local PASSED=0
+            local FAILED=0
+            local TIMEOUT_COUNT=0
+            local TOTAL=0
+
+            for test_file in shell/*.test; do
+              if [ -f "$test_file" ]; then
+                TOTAL=$((TOTAL + 1))
+                TEST_NAME=$(basename "$test_file" .test)
+                EC_FILE="shell/${TEST_NAME}.ec"
+
+                # Run with timeout, capture exit code
+                set +e
+                timeout 2s "$SHELL_PATH" < "$test_file" > /dev/null 2>&1
+                ACTUAL_EC=$?
+                set -e
+
+                # Check for timeout
+                if [ $ACTUAL_EC -eq 124 ]; then
+                  TIMEOUT_COUNT=$((TIMEOUT_COUNT + 1))
+                  continue
+                fi
+
+                # Check exit code
+                if [ -f "$EC_FILE" ]; then
+                  EXPECTED_EC=$(cat "$EC_FILE" | tr -d '[:space:]')
+                  if [ "$ACTUAL_EC" = "$EXPECTED_EC" ]; then
+                    PASSED=$((PASSED + 1))
+                  else
+                    FAILED=$((FAILED + 1))
+                  fi
+                else
+                  # No expected exit code, assume 0
+                  if [ $ACTUAL_EC -eq 0 ]; then
+                    PASSED=$((PASSED + 1))
+                  else
+                    FAILED=$((FAILED + 1))
+                  fi
+                fi
+              fi
+            done
+
+            echo "  Passed:  $PASSED"
+            echo "  Failed:  $FAILED"
+            echo "  Timeout: $TIMEOUT_COUNT"
+            echo "  Total:   $TOTAL"
+            if [ $TOTAL -gt 0 ]; then
+              PERCENT=$((PASSED * 100 / TOTAL))
+              echo "  Rate:    ${PERCENT}%"
+            fi
+          }
+
+          # Test dash
+          DASH_PATH=$(which dash 2>/dev/null || echo "")
+          if [ -n "$DASH_PATH" ]; then
+            echo "Testing: dash ($DASH_PATH)"
+            run_shell_tests "$DASH_PATH" "dash"
+            echo ""
+          else
+            echo "dash not found, skipping"
+          fi
+
+          # Test hash-shell
+          HASH_PATH=$(which hash-shell 2>/dev/null || echo "")
+          if [ -n "$HASH_PATH" ]; then
+            echo "Testing: hash-shell ($HASH_PATH)"
+            run_shell_tests "$HASH_PATH" "hash-shell"
+            echo ""
+          else
+            echo "hash-shell not found, skipping"
+          fi
+
+          echo "=== Comparison Complete ==="

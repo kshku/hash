@@ -10,9 +10,25 @@
 #include <ctype.h>
 #include "cmdsub.h"
 #include "safe_string.h"
+#include "arith.h"
+#include "script.h"
+#include "trap.h"
 
 #define MAX_CMDSUB_LENGTH 8192
 #define MAX_CMD_OUTPUT 65536
+
+// Track exit code from last command substitution
+static int last_cmdsub_exit_code = 0;
+
+// Get the exit code from the last command substitution
+int cmdsub_get_last_exit_code(void) {
+    return last_cmdsub_exit_code;
+}
+
+// Reset the command substitution exit code tracker
+void cmdsub_reset_exit_code(void) {
+    last_cmdsub_exit_code = 0;
+}
 
 // Execute a command and capture its output
 static char *execute_and_capture(const char *cmd) {
@@ -22,6 +38,9 @@ static char *execute_and_capture(const char *cmd) {
     if (pipe(pipefd) == -1) {
         return NULL;
     }
+
+    // Flush stdout before forking to avoid duplicating buffered output
+    fflush(stdout);
 
     pid_t pid = fork();
     if (pid == -1) {
@@ -35,8 +54,16 @@ static char *execute_and_capture(const char *cmd) {
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[1]);
-        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
-        _exit(127);
+
+        // Reset traps for subshell - inherited traps should not execute
+        trap_reset_for_subshell();
+
+        // Use hash's own script execution to preserve function definitions
+        int result = script_execute_string(cmd);
+        fflush(stdout);  // Ensure output is flushed before exit
+        trap_execute_exit();  // Run EXIT trap before exiting subshell
+        fflush(stdout);  // Flush any trap output
+        _exit(result);
     }
 
     // Parent process
@@ -60,7 +87,17 @@ static char *execute_and_capture(const char *cmd) {
 
     close(pipefd[0]);
     output[total_read] = '\0';
-    waitpid(pid, NULL, 0);
+
+    // Wait for child and capture exit status
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        last_cmdsub_exit_code = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        last_cmdsub_exit_code = 128 + WTERMSIG(status);
+    } else {
+        last_cmdsub_exit_code = 1;
+    }
 
     // Remove trailing newlines (like bash does)
     while (total_read > 0 && output[total_read - 1] == '\n') {
@@ -112,6 +149,14 @@ static int has_cmdsub(const char *str) {
 
     const char *p = str;
     while (*p) {
+        // Check for SOH marker with protected backslash (from single quotes: \$ or \`)
+        if (*p == '\x01' && *(p + 1) == '\\' && (*(p + 2) == '$' || *(p + 2) == '`')) {
+            return 1;
+        }
+        // Check for SOH marker (single-quoted dollar sign)
+        if (*p == '\x01' && *(p + 1) == '$') {
+            return 1;
+        }
         if (*p == '\\' && *(p + 1)) {
             if (*(p + 1) == '$' || *(p + 1) == '`') {
                 return 1;
@@ -119,7 +164,15 @@ static int has_cmdsub(const char *str) {
             p += 2;
             continue;
         }
-        if (*p == '$' && *(p + 1) == '(') return 1;
+        // Check for $( but NOT $(( which is arithmetic
+        if (*p == '$' && *(p + 1) == '(') {
+            if (*(p + 2) != '(') {
+                return 1;  // This is command substitution $()
+            }
+            // Skip past $(( - it's arithmetic, not command substitution
+            p += 3;
+            continue;
+        }
         if (*p == '`') return 1;
         p++;
     }
@@ -163,9 +216,33 @@ char *cmdsub_expand(const char *str) {
     const char *p = str;
 
     while (*p && out_pos < MAX_CMDSUB_LENGTH - 1) {
+        // Handle SOH marker with protected backslash (from single quotes: \$ or \`)
+        // Pass through to varexpand which will output \$ or \` literally
+        if (*p == '\x01' && *(p + 1) == '\\' && (*(p + 2) == '$' || *(p + 2) == '`')) {
+            if (out_pos < MAX_CMDSUB_LENGTH - 3) {
+                result[out_pos++] = *p++;  // marker
+                result[out_pos++] = *p++;  // backslash
+                result[out_pos++] = *p++;  // $ or `
+            } else {
+                p += 3;
+            }
+            continue;
+        }
+        // Handle SOH marker (single-quoted dollar sign from parser)
+        // Pass through to varexpand which will output literal $
+        if (*p == '\x01' && *(p + 1) == '$') {
+            if (out_pos < MAX_CMDSUB_LENGTH - 2) {
+                result[out_pos++] = *p++;  // marker
+                result[out_pos++] = *p++;  // $
+            } else {
+                p += 2;
+            }
+            continue;
+        }
         // Handle escape sequences
         if (*p == '\\' && *(p + 1)) {
             if (*(p + 1) == '$' || *(p + 1) == '`') {
+                // Escaped $ or ` - output literal character (prevents substitution)
                 if (out_pos < MAX_CMDSUB_LENGTH - 1) {
                     result[out_pos++] = *(p + 1);
                 }
@@ -181,7 +258,39 @@ char *cmdsub_expand(const char *str) {
             continue;
         }
 
-        // Handle $(...) syntax
+        // Skip $(( arithmetic - let arith_expand handle it later
+        if (*p == '$' && *(p + 1) == '(' && *(p + 2) == '(') {
+            // Copy $(( literally - arithmetic expansion handles this
+            result[out_pos++] = *p++;
+            if (out_pos < MAX_CMDSUB_LENGTH - 1) {
+                result[out_pos++] = *p++;
+            }
+            if (out_pos < MAX_CMDSUB_LENGTH - 1) {
+                result[out_pos++] = *p++;
+            }
+            // Copy until matching ))
+            int depth = 1;
+            while (*p && depth > 0 && out_pos < MAX_CMDSUB_LENGTH - 1) {
+                if (*p == '(' && *(p + 1) == '(') {
+                    depth++;
+                    result[out_pos++] = *p++;
+                    if (out_pos < MAX_CMDSUB_LENGTH - 1) {
+                        result[out_pos++] = *p++;
+                    }
+                } else if (*p == ')' && *(p + 1) == ')') {
+                    depth--;
+                    result[out_pos++] = *p++;
+                    if (out_pos < MAX_CMDSUB_LENGTH - 1) {
+                        result[out_pos++] = *p++;
+                    }
+                } else {
+                    result[out_pos++] = *p++;
+                }
+            }
+            continue;
+        }
+
+        // Handle $(...) syntax (command substitution)
         if (*p == '$' && *(p + 1) == '(') {
             p += 2;
 

@@ -86,9 +86,20 @@ void jobs_update_status(pid_t pid, int status);
 void jobs_check_completed(void);
 
 /**
- * List all jobs (for 'jobs' builtin)
+ * Jobs output format
  */
-void jobs_list(void);
+typedef enum {
+    JOBS_FORMAT_DEFAULT,  // Default format
+    JOBS_FORMAT_LONG,     // -l: Include PID
+    JOBS_FORMAT_PID_ONLY  // -p: Only show PIDs
+} JobsFormat;
+
+/**
+ * List all jobs (for 'jobs' builtin)
+ *
+ * @param format Output format (default, long, or PID-only)
+ */
+void jobs_list(JobsFormat format);
 
 /**
  * Get number of active jobs
@@ -125,5 +136,21 @@ int jobs_background(int job_id);
  * SIGCHLD handler - reaps zombie processes
  */
 void jobs_sigchld_handler(int sig);
+
+/**
+ * Get the PID of the most recently started background job
+ * Used for $! expansion
+ *
+ * @return PID of last background job, or 0 if none
+ */
+pid_t jobs_get_last_bg_pid(void);
+
+/**
+ * Set the PID of the most recently started background job
+ * Called when a background job is started
+ *
+ * @param pid PID of the background job
+ */
+void jobs_set_last_bg_pid(pid_t pid);
 
 #endif // JOBS_H

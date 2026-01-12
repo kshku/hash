@@ -7,7 +7,14 @@
 #include <unistd.h>
 #include <pwd.h>
 #include <sys/types.h>
+#include <sys/times.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <strings.h>
+#include <signal.h>
 #include "hash.h"
 #include "builtins.h"
 #include "colors.h"
@@ -22,6 +29,8 @@
 #include "parser.h"
 #include "safe_string.h"
 #include "update.h"
+#include "shellvar.h"
+#include "trap.h"
 
 extern int last_command_exit_code;
 
@@ -60,7 +69,16 @@ static char *builtin_str[] = {
     "break",
     "continue",
     "eval",
-    "update"
+    "update",
+    "command",
+    "exec",
+    "times",
+    "type",
+    "readonly",
+    "trap",
+    "wait",
+    "kill",
+    "hash"
 };
 
 static int (*builtin_func[])(char **) = {
@@ -90,7 +108,16 @@ static int (*builtin_func[])(char **) = {
     &shell_break,
     &shell_continue_cmd,
     &shell_eval,
-    &shell_update
+    &shell_update,
+    &shell_command,
+    &shell_exec,
+    &shell_times,
+    &shell_type,
+    &shell_readonly,
+    &shell_trap,
+    &shell_wait,
+    &shell_kill,
+    &shell_hash
 };
 
 static int num_builtins(void) {
@@ -126,6 +153,18 @@ static int parse_job_id(const char *arg) {
 int shell_cd(char **args) {
     const char *path = args[1];
 
+    // Handle cd - (go to previous directory)
+    if (path != NULL && strcmp(path, "-") == 0) {
+        path = getenv("OLDPWD");
+        if (!path) {
+            color_error("%s: cd: OLDPWD not set", HASH_NAME);
+            last_command_exit_code = 1;
+            return 1;
+        }
+        // Print the directory when using cd -
+        printf("%s\n", path);
+    }
+
     if (path == NULL) {
         path = getenv("HOME");
 
@@ -144,10 +183,21 @@ int shell_cd(char **args) {
         }
     }
 
+    // Save current directory as OLDPWD before changing
+    char oldpwd[PATH_MAX];
+    if (getcwd(oldpwd, sizeof(oldpwd)) != NULL) {
+        setenv("OLDPWD", oldpwd, 1);
+    }
+
     if (chdir(path) != 0) {
         perror(HASH_NAME);
         last_command_exit_code = 1;
     } else {
+        // Update PWD after successful change
+        char newpwd[PATH_MAX];
+        if (getcwd(newpwd, sizeof(newpwd)) != NULL) {
+            setenv("PWD", newpwd, 1);
+        }
         last_command_exit_code = 0;
     }
 
@@ -169,9 +219,9 @@ int shell_exit(char **args) {
         }
     }
 
-    // Check for running jobs
+    // Check for running jobs (only relevant in interactive mode)
     int job_count = jobs_count();
-    if (job_count > 0) {
+    if (job_count > 0 && isatty(STDIN_FILENO)) {
         color_warning("There are %d running job(s).", job_count);
         printf("Use 'exit' again to force exit, or 'jobs' to see them.\n");
 
@@ -180,6 +230,7 @@ int shell_exit(char **args) {
             exit_attempted = 0;
             fprintf(stdout, "Bye :)\n");
             last_command_exit_code = exit_code;
+            script_state.exit_requested = true;
             return 0;
         }
         exit_attempted = 1;
@@ -187,8 +238,12 @@ int shell_exit(char **args) {
         return 1;
     }
 
-    fprintf(stdout, "Bye :)\n");
+    // Only print goodbye message in interactive mode
+    if (isatty(STDIN_FILENO)) {
+        fprintf(stdout, "Bye :)\n");
+    }
     last_command_exit_code = exit_code;
+    script_state.exit_requested = true;  // Mark that exit was explicitly called
     return 0;
 }
 
@@ -255,10 +310,56 @@ int shell_source(char **args) {
         return 1;
     }
 
+    const char *filepath = args[1];
+    char resolved_path[PATH_MAX];
+
+    // POSIX: If filename doesn't contain '/', search PATH for it
+    if (strchr(filepath, '/') == NULL) {
+        // Use shellvar_get to see shell variables (which may not be in env)
+        const char *path_env = shellvar_get("PATH");
+        if (path_env) {
+            char *path_copy = strdup(path_env);
+            if (path_copy) {
+                char *saveptr;
+                char *dir = strtok_r(path_copy, ":", &saveptr);
+                bool found = false;
+
+                while (dir) {
+                    snprintf(resolved_path, sizeof(resolved_path), "%s/%s", dir, filepath);
+                    // Check if file exists and is readable
+                    if (access(resolved_path, R_OK) == 0) {
+                        filepath = resolved_path;
+                        found = true;
+                        break;
+                    }
+                    dir = strtok_r(NULL, ":", &saveptr);
+                }
+                free(path_copy);
+
+                if (!found) {
+                    // File not found in PATH
+                    fprintf(stderr, "%s: %s: not found\n", args[0], args[1]);
+                    last_command_exit_code = 1;
+                    // Special builtin: non-interactive shell should exit on error
+                    return is_interactive ? 1 : 0;
+                }
+            }
+        }
+    } else {
+        // Filepath contains '/' - check if it exists
+        if (access(filepath, R_OK) != 0) {
+            fprintf(stderr, "%s: %s: not found\n", args[0], args[1]);
+            last_command_exit_code = 1;
+            // Special builtin: non-interactive shell should exit on error
+            return is_interactive ? 1 : 0;
+        }
+    }
+
     // Execute the script file
     // If we're already in silent mode (e.g., sourcing system files),
     // continue in silent mode for nested sources
-    int result = script_execute_file_ex(args[1], 0, NULL, script_state.silent_errors);
+    // Note: break/continue have lexical scope - they don't propagate from sourced files
+    int result = script_execute_file_ex(filepath, 0, NULL, script_state.silent_errors);
     last_command_exit_code = result;
 
     return 1;
@@ -266,10 +367,14 @@ int shell_source(char **args) {
 
 int shell_export(char **args) {
     if (args[1] == NULL) {
-        extern char **environ;
-        for (char **env = environ; *env != NULL; env++) {
-            printf("export %s\n", *env);
-        }
+        shellvar_list_exported();
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // Handle export -p option (same as export with no args)
+    if (strcmp(args[1], "-p") == 0) {
+        shellvar_list_exported();
         last_command_exit_code = 0;
         return 1;
     }
@@ -277,12 +382,12 @@ int shell_export(char **args) {
     for (int i = 1; args[i] != NULL; i++) {
         char *equals = strchr(args[i], '=');
         if (!equals) {
-            // Just marking for export - check if variable exists
-            const char *val = getenv(args[i]);
-            if (!val) {
-                // Variable doesn't exist, but that's OK for export
-                last_command_exit_code = 0;
+            // Just marking for export - mark variable for export
+            if (shellvar_is_readonly(args[i])) {
+                // It's OK to export a readonly variable
             }
+            shellvar_set_export(args[i]);
+            last_command_exit_code = 0;
             continue;
         }
 
@@ -290,12 +395,25 @@ int shell_export(char **args) {
         const char *name = args[i];
         const char *value = equals + 1;
 
-        if (setenv(name, value, 1) == 0) {
+        // Check if readonly
+        if (shellvar_is_readonly(name)) {
+            fprintf(stderr, "%s: %s: readonly variable\n", HASH_NAME, name);
+            last_command_exit_code = 1;
+            *equals = '=';  // Restore for next iteration
+            return 0;  // Exit shell in non-interactive mode per POSIX
+        }
+
+        // Set and export the variable
+        if (shellvar_set(name, value) == 0) {
+            shellvar_set_export(name);
+            setenv(name, value, 1);
             last_command_exit_code = 0;
         } else {
-            perror(HASH_NAME);
             last_command_exit_code = 1;
+            *equals = '=';
+            return 0;  // Exit shell on error
         }
+        *equals = '=';  // Restore
     }
 
     return 1;
@@ -333,8 +451,8 @@ int shell_history(char **args) {
 
 int shell_set(char **args) {
     // Handle set with no arguments - list all shell variables
-    // (For now, we don't maintain shell-local variables, so this is a no-op)
     if (args[1] == NULL) {
+        shellvar_list_all();
         last_command_exit_code = 0;
         return 1;
     }
@@ -342,6 +460,82 @@ int shell_set(char **args) {
     // Handle set option=value syntax for hash-specific options
     for (int i = 1; args[i] != NULL; i++) {
         const char *arg = args[i];
+
+        // Handle -- to set positional parameters
+        // set -- arg1 arg2 ... sets $1, $2, etc.
+        // set -- (with no args) clears positional parameters
+        if (strcmp(arg, "--") == 0) {
+            // Count remaining arguments
+            int argc = 0;
+            for (int j = i + 1; args[j] != NULL; j++) {
+                argc++;
+            }
+            // Set positional parameters ($1, $2, ...)
+            script_set_positional_params(argc, argc > 0 ? &args[i + 1] : NULL);
+            last_command_exit_code = 0;
+            return 1;
+        }
+
+        // Handle POSIX shell options: -u, +u, -m, +m, -o option, +o option, etc.
+        if (strcmp(arg, "-u") == 0) {
+            shell_option_set_nounset(true);
+            last_command_exit_code = 0;
+            continue;
+        } else if (strcmp(arg, "+u") == 0) {
+            shell_option_set_nounset(false);
+            last_command_exit_code = 0;
+            continue;
+        } else if (strcmp(arg, "-e") == 0) {
+            shell_option_set_errexit(true);
+            last_command_exit_code = 0;
+            continue;
+        } else if (strcmp(arg, "+e") == 0) {
+            shell_option_set_errexit(false);
+            last_command_exit_code = 0;
+            continue;
+        } else if (strcmp(arg, "-m") == 0) {
+            shell_option_set_monitor(true);
+            last_command_exit_code = 0;
+            continue;
+        } else if (strcmp(arg, "+m") == 0) {
+            shell_option_set_monitor(false);
+            last_command_exit_code = 0;
+            continue;
+        } else if (strcmp(arg, "-o") == 0 && args[i + 1] != NULL) {
+            // Handle -o option_name
+            const char *opt = args[++i];
+            if (strcmp(opt, "nounset") == 0) {
+                shell_option_set_nounset(true);
+            } else if (strcmp(opt, "errexit") == 0) {
+                shell_option_set_errexit(true);
+            } else if (strcmp(opt, "monitor") == 0) {
+                shell_option_set_monitor(true);
+            } else if (strcmp(opt, "nonlexicalctrl") == 0) {
+                shell_option_set_nonlexicalctrl(true);
+            } else if (strcmp(opt, "nolog") == 0) {
+                shell_option_set_nolog(true);
+            }
+            // Silently ignore unknown -o options for compatibility
+            last_command_exit_code = 0;
+            continue;
+        } else if (strcmp(arg, "+o") == 0 && args[i + 1] != NULL) {
+            // Handle +o option_name (disable option)
+            const char *opt = args[++i];
+            if (strcmp(opt, "nounset") == 0) {
+                shell_option_set_nounset(false);
+            } else if (strcmp(opt, "errexit") == 0) {
+                shell_option_set_errexit(false);
+            } else if (strcmp(opt, "monitor") == 0) {
+                shell_option_set_monitor(false);
+            } else if (strcmp(opt, "nonlexicalctrl") == 0) {
+                shell_option_set_nonlexicalctrl(false);
+            } else if (strcmp(opt, "nolog") == 0) {
+                shell_option_set_nolog(false);
+            }
+            // Silently ignore unknown +o options for compatibility
+            last_command_exit_code = 0;
+            continue;
+        }
 
         // Handle colors option
         if (strcmp(arg, "colors=on") == 0) {
@@ -403,8 +597,18 @@ int shell_set(char **args) {
 // ============================================================================
 
 int shell_jobs(char **args) {
-    (void)args;
-    jobs_list();
+    JobsFormat format = JOBS_FORMAT_DEFAULT;
+
+    // Parse options
+    for (int i = 1; args[i] != NULL; i++) {
+        if (strcmp(args[i], "-l") == 0) {
+            format = JOBS_FORMAT_LONG;
+        } else if (strcmp(args[i], "-p") == 0) {
+            format = JOBS_FORMAT_PID_ONLY;
+        }
+    }
+
+    jobs_list(format);
     last_command_exit_code = 0;
     return 1;
 }
@@ -447,7 +651,7 @@ int shell_logout(char **args) {
     }
 
     int job_count = jobs_count();
-    if (job_count > 0) {
+    if (job_count > 0 && isatty(STDIN_FILENO)) {
         color_warning("There are %d running job(s).", job_count);
         printf("Use 'logout' again to force logout, or 'jobs' to see them.\n");
 
@@ -463,7 +667,10 @@ int shell_logout(char **args) {
         return 1;
     }
 
-    fprintf(stdout, "Bye :)\n");
+    // Only print goodbye message in interactive mode
+    if (isatty(STDIN_FILENO)) {
+        fprintf(stdout, "Bye :)\n");
+    }
     last_command_exit_code = 0;
     return 0;
 }
@@ -514,16 +721,27 @@ int shell_unset(char **args) {
         }
     }
 
+    int error = 0;
     for (int i = start; args[i] != NULL; i++) {
         if (unset_var) {
-            unsetenv(args[i]);
+            // Check for readonly variable
+            if (shellvar_unset(args[i]) != 0) {
+                // shellvar_unset prints error for readonly
+                error = 1;
+                // In non-interactive mode, exit shell per POSIX
+                // In interactive mode, continue processing
+                if (!is_interactive) {
+                    last_command_exit_code = 1;
+                    return 0;  // Exit shell
+                }
+            }
         }
         if (unset_func) {
             // TODO: Implement function unset when functions are fully implemented
         }
     }
 
-    last_command_exit_code = 0;
+    last_command_exit_code = error ? 1 : 0;
     return 1;
 }
 
@@ -553,6 +771,7 @@ int shell_echo(char **args) {
     bool newline = true;
     bool interpret_escapes = false;
     int start = 1;
+    int write_error = 0;
 
     // Handle options
     while (args[start] != NULL && args[start][0] == '-') {
@@ -573,7 +792,7 @@ int shell_echo(char **args) {
     // Print arguments
     for (int i = start; args[i] != NULL; i++) {
         if (i > start) {
-            putchar(' ');
+            if (putchar(' ') == EOF) write_error = 1;
         }
 
         if (interpret_escapes) {
@@ -583,33 +802,39 @@ int shell_echo(char **args) {
                 if (*s == '\\' && *(s + 1)) {
                     s++;
                     switch (*s) {
-                        case 'n': putchar('\n'); break;
-                        case 't': putchar('\t'); break;
-                        case 'r': putchar('\r'); break;
-                        case '\\': putchar('\\'); break;
-                        case 'a': putchar('\a'); break;
-                        case 'b': putchar('\b'); break;
-                        case 'f': putchar('\f'); break;
-                        case 'v': putchar('\v'); break;
+                        case 'n': if (putchar('\n') == EOF) write_error = 1; break;
+                        case 't': if (putchar('\t') == EOF) write_error = 1; break;
+                        case 'r': if (putchar('\r') == EOF) write_error = 1; break;
+                        case '\\': if (putchar('\\') == EOF) write_error = 1; break;
+                        case 'a': if (putchar('\a') == EOF) write_error = 1; break;
+                        case 'b': if (putchar('\b') == EOF) write_error = 1; break;
+                        case 'f': if (putchar('\f') == EOF) write_error = 1; break;
+                        case 'v': if (putchar('\v') == EOF) write_error = 1; break;
                         case 'c': goto done;  // Stop output
-                        default: putchar('\\'); putchar(*s); break;
+                        default:
+                            if (putchar('\\') == EOF) write_error = 1;
+                            if (putchar(*s) == EOF) write_error = 1;
+                            break;
                     }
                 } else {
-                    putchar(*s);
+                    if (putchar(*s) == EOF) write_error = 1;
                 }
                 s++;
             }
         } else {
-            printf("%s", args[i]);
+            if (printf("%s", args[i]) < 0) write_error = 1;
         }
     }
 
 done:
     if (newline) {
-        putchar('\n');
+        if (putchar('\n') == EOF) write_error = 1;
     }
 
-    last_command_exit_code = 0;
+    // Check for write errors on flush
+    if (fflush(stdout) == EOF) write_error = 1;
+
+    last_command_exit_code = write_error ? 1 : 0;
     return 1;
 }
 
@@ -686,7 +911,8 @@ int shell_read(char **args) {
 // ============================================================================
 
 int shell_return(char **args) {
-    int return_code = 0;
+    // POSIX: If no argument is provided, use the exit status of the last command
+    int return_code = last_command_exit_code;
 
     if (args[1] != NULL) {
         char *endptr;
@@ -725,14 +951,21 @@ int shell_break(char **args) {
         levels = (int)val;
     }
 
-    // Check if we're in a loop
-    if (!script_in_control_structure()) {
+    // POSIX: Check if we're in a loop (dynamic scoping across function boundaries)
+    int available_loops = script_count_loops_at_current_depth();
+    if (available_loops == 0) {
         fprintf(stderr, "%s: break: only meaningful in a `for', `while', or `until' loop\n", HASH_NAME);
         last_command_exit_code = 0;
         return 1;
     }
 
-    (void)levels;  // TODO: Handle multiple levels
+    // If requesting more levels than available, just break all available
+    if (levels > available_loops) {
+        levels = available_loops;
+    }
+
+    // Set pending break levels for dynamic scoping propagation
+    script_set_break_pending(levels);
 
     last_command_exit_code = 0;
     return -3;  // Special return code for "break from loop"
@@ -752,13 +985,21 @@ int shell_continue_cmd(char **args) {
         levels = (int)val;
     }
 
-    if (!script_in_control_structure()) {
+    // POSIX: Check if we're in a loop (dynamic scoping across function boundaries)
+    int available_loops = script_count_loops_at_current_depth();
+    if (available_loops == 0) {
         fprintf(stderr, "%s: continue: only meaningful in a `for', `while', or `until' loop\n", HASH_NAME);
         last_command_exit_code = 0;
         return 1;
     }
 
-    (void)levels;  // TODO: Handle multiple levels
+    // If requesting more levels than available, just continue the outermost available
+    if (levels > available_loops) {
+        levels = available_loops;
+    }
+
+    // Set pending continue levels for dynamic scoping propagation
+    script_set_continue_pending(levels);
 
     last_command_exit_code = 0;
     return -4;  // Special return code for "continue loop"
@@ -790,16 +1031,1067 @@ int shell_eval(char **args) {
         strcat(cmd, args[i]);
     }
 
-    // Execute the concatenated command
-    CommandChain *chain = chain_parse(cmd);
-    if (chain) {
-        chain_execute(chain);
-        chain_free(chain);
-    }
+    // Save context depth before eval to detect incomplete compound commands
+    int saved_context_depth = script_state.context_depth;
+
+    // Execute using script_process_line to properly handle shell keywords
+    int result = script_process_line(cmd);
 
     free(cmd);
 
-    // Exit code already set by chain_execute
+    // Check for incomplete compound command (syntax error)
+    // If context depth increased, eval introduced an incomplete structure like "if" without "then"
+    if (script_state.context_depth > saved_context_depth) {
+        fprintf(stderr, "%s: eval: syntax error: unexpected end of file\n", HASH_NAME);
+        last_command_exit_code = 2;
+        // POSIX: In non-interactive shell, syntax error causes exit
+        // Clear the incomplete contexts introduced by eval
+        while (script_state.context_depth > saved_context_depth) {
+            script_pop_context();
+        }
+        script_state.exit_requested = true;
+        return 0;  // Signal exit
+    }
+
+    // POSIX: Check for pending break/continue to propagate from eval
+    if (script_get_break_pending() > 0) {
+        return -3;  // Propagate break signal
+    }
+    if (script_get_continue_pending() > 0) {
+        return -4;  // Propagate continue signal
+    }
+
+    // Handle exit request from eval
+    if (result == 0) {
+        return 0;  // Exit was called
+    }
+
+    // Exit code already set by script_process_line
+    return 1;
+}
+
+// ============================================================================
+// Command Information Builtins
+// ============================================================================
+
+// POSIX reserved words (keywords)
+static const char *posix_keywords[] = {
+    "!", "{", "}", "case", "do", "done", "elif", "else", "esac",
+    "fi", "for", "if", "in", "then", "until", "while", NULL
+};
+
+// Check if word is a POSIX reserved word
+static bool is_posix_keyword(const char *word) {
+    for (int i = 0; posix_keywords[i] != NULL; i++) {
+        if (strcmp(word, posix_keywords[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Check if name is a builtin (helper for command -v/-V)
+static bool is_builtin_name(const char *name) {
+    for (int i = 0; i < num_builtins(); i++) {
+        if (strcmp(name, builtin_str[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Find command in PATH and return full path (caller must free)
+char *find_in_path(const char *cmd) {
+    // If cmd contains /, it's already a path
+    if (strchr(cmd, '/') != NULL) {
+        if (access(cmd, X_OK) == 0) {
+            return strdup(cmd);
+        }
+        return NULL;
+    }
+
+    const char *path_env = getenv("PATH");
+    if (!path_env) {
+        path_env = "/usr/bin:/bin";
+    }
+
+    char *path_copy = strdup(path_env);
+    if (!path_copy) return NULL;
+
+    char *saveptr;
+    char *dir = strtok_r(path_copy, ":", &saveptr);
+
+    while (dir) {
+        char fullpath[4096];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, cmd);
+
+        if (access(fullpath, X_OK) == 0) {
+            free(path_copy);
+            return strdup(fullpath);
+        }
+        dir = strtok_r(NULL, ":", &saveptr);
+    }
+
+    free(path_copy);
+    return NULL;
+}
+
+int shell_command(char **args) {
+    bool opt_v = false;  // -v: print command path
+    bool opt_V = false;  // -V: verbose description
+    bool opt_p = false;  // -p: use default PATH
+    int arg_start = 1;
+
+    // Parse options
+    while (args[arg_start] && args[arg_start][0] == '-') {
+        const char *opt = args[arg_start];
+        if (strcmp(opt, "-v") == 0) {
+            opt_v = true;
+            arg_start++;
+        } else if (strcmp(opt, "-V") == 0) {
+            opt_V = true;
+            arg_start++;
+        } else if (strcmp(opt, "-p") == 0) {
+            opt_p = true;
+            arg_start++;
+        } else if (strcmp(opt, "--") == 0) {
+            arg_start++;
+            break;
+        } else {
+            // Unknown option
+            break;
+        }
+    }
+
+    (void)opt_p;  // TODO: implement default PATH
+
+    // No command specified
+    if (!args[arg_start]) {
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    const char *cmd = args[arg_start];
+
+    // Handle -v option (print command location/type)
+    if (opt_v) {
+        int found = 0;
+
+        // Check for alias first
+        const char *alias_val = config_get_alias(cmd);
+        if (alias_val) {
+            printf("alias %s='%s'\n", cmd, alias_val);
+            found = 1;
+        }
+
+        // Check for keyword
+        if (is_posix_keyword(cmd)) {
+            printf("%s\n", cmd);
+            found = 1;
+        }
+
+        // Check for builtin
+        if (is_builtin_name(cmd)) {
+            printf("%s\n", cmd);
+            found = 1;
+        }
+
+        // Check for function
+        if (script_get_function(cmd)) {
+            printf("%s\n", cmd);
+            found = 1;
+        }
+
+        // Check for external command
+        if (!found) {
+            char *path = find_in_path(cmd);
+            if (path) {
+                printf("%s\n", path);
+                free(path);
+                found = 1;
+            }
+        }
+
+        last_command_exit_code = found ? 0 : 1;
+        return 1;
+    }
+
+    // Handle -V option (verbose description)
+    if (opt_V) {
+        int found = 0;
+
+        // Check for alias
+        const char *alias_val = config_get_alias(cmd);
+        if (alias_val) {
+            printf("%s is aliased to '%s'\n", cmd, alias_val);
+            found = 1;
+        }
+
+        // Check for keyword
+        if (is_posix_keyword(cmd)) {
+            printf("%s is a shell keyword\n", cmd);
+            found = 1;
+        }
+
+        // Check for builtin
+        if (is_builtin_name(cmd)) {
+            printf("%s is a shell builtin\n", cmd);
+            found = 1;
+        }
+
+        // Check for function
+        if (script_get_function(cmd)) {
+            printf("%s is a function\n", cmd);
+            found = 1;
+        }
+
+        // Check for external command
+        if (!found) {
+            char *path = find_in_path(cmd);
+            if (path) {
+                printf("%s is %s\n", cmd, path);
+                free(path);
+                found = 1;
+            }
+        }
+
+        if (!found) {
+            fprintf(stderr, "%s: %s: not found\n", HASH_NAME, cmd);
+        }
+
+        last_command_exit_code = found ? 0 : 1;
+        return 1;
+    }
+
+    // Execute command, bypassing functions
+    // First check builtins
+    // POSIX: 'command' removes "special" status from special builtins
+    // So errors should not cause shell to exit (always return 1)
+    int result = try_builtin(args + arg_start);
+    if (result != -1) {
+        // Always return 1 (continue) - special builtins lose their "exit on error" behavior
+        // The exit code is already set in last_command_exit_code by the builtin
+        return 1;
+    }
+
+    // Execute as external command (execute() will handle it)
+    // We need to skip function lookup, so we directly launch
+    // For now, just call execute which handles external commands
+    execute(args + arg_start);
+    return 1;
+}
+
+int shell_exec(char **args) {
+    // exec with no arguments: just return success (noop)
+    if (!args[1]) {
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // Check for redirections only (exec N<file, exec N>file, etc.)
+    // These persist for the shell process
+    int i = 1;
+    bool has_command = false;
+
+    // Parse for redirections vs command
+    for (i = 1; args[i]; i++) {
+        const char *arg = args[i];
+        // Check if this looks like a redirection
+        // Patterns: N<file, N>file, N>>file, N<&M, N>&M, <file, >file, etc.
+        bool is_redir = false;
+
+        // Check for digit prefix followed by redirection operator
+        const char *p = arg;
+        while (*p && isdigit(*p)) p++;
+
+        if (*p == '<' || *p == '>') {
+            is_redir = true;
+        } else if (p == arg) {
+            // No digit prefix, check for bare redirection
+            if (*p == '<' || *p == '>') {
+                is_redir = true;
+            }
+        }
+
+        if (!is_redir) {
+            has_command = true;
+            break;
+        }
+    }
+
+    // Handle redirections
+    for (i = 1; args[i]; i++) {
+        const char *arg = args[i];
+
+        // Parse fd number (default to 0 for input, 1 for output)
+        int fd = -1;
+        const char *p = arg;
+
+        while (*p && isdigit(*p)) p++;
+
+        if (p > arg) {
+            fd = atoi(arg);
+        }
+
+        // Handle different redirection types
+        if (*p == '<') {
+            if (fd < 0) fd = 0;  // Default input fd
+            p++;
+
+            if (*p == '&') {
+                // N<&M or N<&-
+                p++;
+                if (*p == '-') {
+                    // Close fd
+                    close(fd);
+                } else {
+                    // Duplicate fd
+                    int src_fd = atoi(p);
+                    if (dup2(src_fd, fd) < 0) {
+                        perror(HASH_NAME);
+                        last_command_exit_code = 1;
+                        return 1;
+                    }
+                }
+            } else {
+                // N<file - open file for input
+                const char *filename = p;
+                if (!*filename && args[i + 1]) {
+                    filename = args[++i];
+                }
+                int new_fd = open(filename, O_RDONLY);
+                if (new_fd < 0) {
+                    fprintf(stderr, "%s: %s: %s\n", HASH_NAME, filename, strerror(errno));
+                    last_command_exit_code = 1;
+                    return 1;
+                }
+                if (new_fd != fd) {
+                    dup2(new_fd, fd);
+                    close(new_fd);
+                }
+            }
+        } else if (*p == '>') {
+            if (fd < 0) fd = 1;  // Default output fd
+            p++;
+
+            bool append = false;
+            if (*p == '>') {
+                append = true;
+                p++;
+            }
+
+            if (*p == '&') {
+                // N>&M or N>&-
+                p++;
+                if (*p == '-') {
+                    close(fd);
+                } else {
+                    int src_fd = atoi(p);
+                    if (dup2(src_fd, fd) < 0) {
+                        perror(HASH_NAME);
+                        last_command_exit_code = 1;
+                        return 1;
+                    }
+                }
+            } else {
+                // N>file or N>>file
+                const char *filename = p;
+                if (!*filename && args[i + 1]) {
+                    filename = args[++i];
+                }
+                int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+                int new_fd = open(filename, flags, 0644);
+                if (new_fd < 0) {
+                    fprintf(stderr, "%s: %s: %s\n", HASH_NAME, filename, strerror(errno));
+                    last_command_exit_code = 1;
+                    return 1;
+                }
+                if (new_fd != fd) {
+                    dup2(new_fd, fd);
+                    close(new_fd);
+                }
+            }
+        } else if (has_command) {
+            // This is the command to exec
+            break;
+        }
+    }
+
+    // If there's a command, replace the shell
+    if (has_command) {
+        // Find the command start
+        for (i = 1; args[i]; i++) {
+            const char *arg = args[i];
+            const char *p = arg;
+            while (*p && isdigit(*p)) p++;
+            if (*p != '<' && *p != '>') {
+                // This is the command
+                // Flush all output buffers before replacing the process
+                fflush(stdout);
+                fflush(stderr);
+                execvp(args[i], args + i);
+                // If we get here, exec failed
+                fprintf(stderr, "%s: %s: %s\n", HASH_NAME, args[i], strerror(errno));
+                last_command_exit_code = 127;
+                return 0;  // Exit shell on exec failure
+            }
+        }
+    }
+
+    last_command_exit_code = 0;
+    return 1;
+}
+
+int shell_times(char **args) {
+    (void)args;
+
+    struct tms times_buf;
+    clock_t real_time = times(&times_buf);
+
+    if (real_time == (clock_t)-1) {
+        perror(HASH_NAME);
+        last_command_exit_code = 1;
+        return 1;
+    }
+
+    long ticks_per_sec = sysconf(_SC_CLK_TCK);
+    if (ticks_per_sec <= 0) ticks_per_sec = 100;  // Fallback
+
+    // Shell times (user and system)
+    long shell_user_sec = times_buf.tms_utime / ticks_per_sec;
+    long shell_user_ms = (times_buf.tms_utime % ticks_per_sec) * 1000 / ticks_per_sec;
+    long shell_sys_sec = times_buf.tms_stime / ticks_per_sec;
+    long shell_sys_ms = (times_buf.tms_stime % ticks_per_sec) * 1000 / ticks_per_sec;
+
+    // Children times (user and system)
+    long child_user_sec = times_buf.tms_cutime / ticks_per_sec;
+    long child_user_ms = (times_buf.tms_cutime % ticks_per_sec) * 1000 / ticks_per_sec;
+    long child_sys_sec = times_buf.tms_cstime / ticks_per_sec;
+    long child_sys_ms = (times_buf.tms_cstime % ticks_per_sec) * 1000 / ticks_per_sec;
+
+    // Print in format: Xm0.XXXs Xm0.XXXs
+    // Check for I/O errors (e.g., broken pipe)
+    if (printf("%ldm%ld.%03lds %ldm%ld.%03lds\n",
+           shell_user_sec / 60, shell_user_sec % 60, shell_user_ms,
+           shell_sys_sec / 60, shell_sys_sec % 60, shell_sys_ms) < 0 ||
+        printf("%ldm%ld.%03lds %ldm%ld.%03lds\n",
+           child_user_sec / 60, child_user_sec % 60, child_user_ms,
+           child_sys_sec / 60, child_sys_sec % 60, child_sys_ms) < 0 ||
+        fflush(stdout) != 0) {
+        fprintf(stderr, "%s: times: I/O error\n", HASH_NAME);
+        last_command_exit_code = 2;
+        return 1;
+    }
+
+    last_command_exit_code = 0;
+    return 1;
+}
+
+int shell_type(char **args) {
+    // type is equivalent to command -V
+    if (!args[1]) {
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    int all_found = 1;
+
+    for (int i = 1; args[i]; i++) {
+        const char *cmd = args[i];
+        int found = 0;
+
+        // Check for alias
+        const char *alias_val = config_get_alias(cmd);
+        if (alias_val) {
+            printf("%s is aliased to '%s'\n", cmd, alias_val);
+            found = 1;
+        }
+
+        // Check for keyword
+        if (is_posix_keyword(cmd)) {
+            printf("%s is a shell keyword\n", cmd);
+            found = 1;
+        }
+
+        // Check for builtin
+        if (is_builtin_name(cmd)) {
+            printf("%s is a shell builtin\n", cmd);
+            found = 1;
+        }
+
+        // Check for function
+        if (script_get_function(cmd)) {
+            printf("%s is a function\n", cmd);
+            found = 1;
+        }
+
+        // Check for external command
+        if (!found) {
+            char *path = find_in_path(cmd);
+            if (path) {
+                printf("%s is %s\n", cmd, path);
+                free(path);
+                found = 1;
+            }
+        }
+
+        if (!found) {
+            fprintf(stderr, "%s: type: %s: not found\n", HASH_NAME, cmd);
+            all_found = 0;
+        }
+    }
+
+    last_command_exit_code = all_found ? 0 : 1;
+    return 1;
+}
+
+int shell_readonly(char **args) {
+    // readonly with no args: list all readonly variables
+    if (args[1] == NULL) {
+        shellvar_list_readonly();
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // Handle options
+    int start = 1;
+    while (args[start] && args[start][0] == '-') {
+        if (strcmp(args[start], "-p") == 0) {
+            if (args[start + 1] == NULL) {
+                shellvar_list_readonly();
+                last_command_exit_code = 0;
+                return 1;
+            }
+            start++;
+        } else if (strcmp(args[start], "--") == 0) {
+            // End of options
+            start++;
+            break;
+        } else {
+            // Unknown option - just skip it for now
+            start++;
+        }
+    }
+
+    // Process each argument
+    for (int i = start; args[i] != NULL; i++) {
+        const char *arg = args[i];
+        char *equals = strchr(arg, '=');
+
+        if (equals) {
+            // readonly name=value: set and mark as readonly
+            *equals = '\0';
+            const char *name = arg;
+            const char *value = equals + 1;
+
+            // Check if already readonly with different value
+            if (shellvar_is_readonly(name)) {
+                const char *old_val = shellvar_get(name);
+                if (old_val && strcmp(old_val, value) != 0) {
+                    fprintf(stderr, "readonly: %s: is read only\n", name);
+                    last_command_exit_code = 1;
+                    *equals = '=';
+                    return 0;  // Exit shell per POSIX (unless via 'command')
+                }
+            }
+
+            // Set the value first
+            if (shellvar_set(name, value) != 0) {
+                last_command_exit_code = 1;
+                *equals = '=';
+                return 0;
+            }
+
+            // Then mark as readonly
+            shellvar_set_readonly(name);
+
+            // Also set in environment
+            setenv(name, value, 1);
+
+            *equals = '=';
+        } else {
+            // readonly name: just mark as readonly
+            shellvar_set_readonly(arg);
+        }
+    }
+
+    last_command_exit_code = 0;
+    return 1;
+}
+
+int shell_trap(char **args) {
+    // trap with no args: list all traps
+    if (args[1] == NULL) {
+        trap_list();
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // trap -p: print traps (same as no args for now)
+    if (strcmp(args[1], "-p") == 0) {
+        if (args[2] == NULL) {
+            trap_list();
+        } else {
+            // Print specific traps
+            for (int i = 2; args[i]; i++) {
+                int signum = trap_parse_signal(args[i]);
+                if (signum >= 0) {
+                    const char *action = trap_get(signum);
+                    if (action) {
+                        const char *name = trap_signal_name(signum);
+                        if (name) {
+                            printf("trap -- '%s' %s\n", action, name);
+                        } else {
+                            printf("trap -- '%s' %d\n", action, signum);
+                        }
+                    }
+                }
+            }
+        }
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // trap -l: list signal names
+    if (strcmp(args[1], "-l") == 0) {
+        // Print common signal numbers and names
+        printf(" 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4) SIGILL\n");
+        printf(" 5) SIGTRAP\t 6) SIGABRT\t 7) SIGBUS\t 8) SIGFPE\n");
+        printf(" 9) SIGKILL\t10) SIGUSR1\t11) SIGSEGV\t12) SIGUSR2\n");
+        printf("13) SIGPIPE\t14) SIGALRM\t15) SIGTERM\t16) SIGSTKFLT\n");
+        printf("17) SIGCHLD\t18) SIGCONT\t19) SIGSTOP\t20) SIGTSTP\n");
+        printf("21) SIGTTIN\t22) SIGTTOU\n");
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // Check if first arg is a signal name (reset to default)
+    // trap signal [signal...]: reset signals to default
+    // trap '' signal [signal...]: ignore signals
+    // trap action signal [signal...]: set trap
+
+    const char *action = args[1];
+    int start = 2;
+
+    // If action is "-", it means reset to default
+    if (action[0] == '-' && action[1] == '\0') {
+        action = NULL;
+    }
+
+    // Set traps for all specified signals
+    for (int i = start; args[i]; i++) {
+        if (trap_set(action, args[i]) != 0) {
+            last_command_exit_code = 1;
+            return 1;
+        }
+    }
+
+    last_command_exit_code = 0;
+    return 1;
+}
+
+int shell_wait(char **args) {
+    // Block SIGCHLD during wait to prevent race condition where
+    // the SIGCHLD handler reaps children before waitpid can see them
+    sigset_t block_mask, old_mask;
+    sigemptyset(&block_mask);
+    sigaddset(&block_mask, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &block_mask, &old_mask);
+
+    // wait with no args: wait for all background jobs
+    if (args[1] == NULL) {
+        int status;
+        pid_t pid;
+
+        // Wait for all child processes
+        // Keep trying until no more children (ECHILD) or interrupted
+        while (1) {
+            pid = waitpid(-1, &status, 0);
+            if (pid > 0) {
+                // Successfully waited for a child
+                jobs_update_status(pid, status);
+                Job *job = jobs_get_by_pid(pid);
+                if (job && (job->state == JOB_DONE || job->state == JOB_TERMINATED)) {
+                    jobs_remove(job->job_id);
+                }
+            } else if (pid == -1) {
+                if (errno == ECHILD) {
+                    // No more children to wait for
+                    break;
+                } else if (errno == EINTR) {
+                    // Interrupted by signal, try again
+                    continue;
+                } else {
+                    // Other error, stop waiting
+                    break;
+                }
+            } else {
+                // pid == 0 shouldn't happen without WNOHANG, but handle it
+                break;
+            }
+        }
+
+        sigprocmask(SIG_SETMASK, &old_mask, NULL);
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // wait with arguments: wait for specific PIDs or job IDs
+    for (int i = 1; args[i]; i++) {
+        const char *arg = args[i];
+        pid_t pid = 0;
+        int job_id_to_remove = 0;
+
+        // Check for job ID (%n)
+        if (arg[0] == '%') {
+            const Job *job = NULL;
+            if (arg[1] == '%' || arg[1] == '+' || arg[1] == '\0') {
+                // %%, %+, or just % - current job
+                job = jobs_get_current();
+            } else {
+                int job_id = atoi(arg + 1);
+                job = jobs_get(job_id);
+            }
+            if (job) {
+                pid = job->pid;
+                job_id_to_remove = job->job_id;
+            } else {
+                fprintf(stderr, "%s: wait: %s: no such job\n", HASH_NAME, arg);
+                last_command_exit_code = 127;
+                continue;
+            }
+        } else {
+            // PID
+            pid = atoi(arg);
+            // Find job ID if this PID is in the table
+            Job *job = jobs_get_by_pid(pid);
+            if (job) {
+                job_id_to_remove = job->job_id;
+            }
+        }
+
+        if (pid > 0) {
+            int status;
+            if (waitpid(pid, &status, 0) > 0) {
+                if (WIFEXITED(status)) {
+                    last_command_exit_code = WEXITSTATUS(status);
+                } else {
+                    last_command_exit_code = 128 + WTERMSIG(status);
+                }
+                jobs_update_status(pid, status);
+                // Remove the completed job from the table
+                if (job_id_to_remove > 0) {
+                    jobs_remove(job_id_to_remove);
+                }
+            } else {
+                // Process already exited or doesn't exist
+                last_command_exit_code = 127;
+                // Still remove from job table if it exists
+                if (job_id_to_remove > 0) {
+                    jobs_remove(job_id_to_remove);
+                }
+            }
+        }
+    }
+
+    sigprocmask(SIG_SETMASK, &old_mask, NULL);
+    return 1;
+}
+
+// Signal name to number mapping
+static int signal_name_to_number(const char *name) {
+    // Skip optional "SIG" prefix
+    if (strncasecmp(name, "SIG", 3) == 0) {
+        name += 3;
+    }
+
+    // Common signals
+    if (strcasecmp(name, "HUP") == 0) return SIGHUP;
+    if (strcasecmp(name, "INT") == 0) return SIGINT;
+    if (strcasecmp(name, "QUIT") == 0) return SIGQUIT;
+    if (strcasecmp(name, "ILL") == 0) return SIGILL;
+#ifdef SIGTRAP
+    if (strcasecmp(name, "TRAP") == 0) return SIGTRAP;
+#endif
+    if (strcasecmp(name, "ABRT") == 0) return SIGABRT;
+    if (strcasecmp(name, "FPE") == 0) return SIGFPE;
+    if (strcasecmp(name, "KILL") == 0) return SIGKILL;
+    if (strcasecmp(name, "BUS") == 0) return SIGBUS;
+    if (strcasecmp(name, "SEGV") == 0) return SIGSEGV;
+    if (strcasecmp(name, "SYS") == 0) return SIGSYS;
+    if (strcasecmp(name, "PIPE") == 0) return SIGPIPE;
+    if (strcasecmp(name, "ALRM") == 0) return SIGALRM;
+    if (strcasecmp(name, "TERM") == 0) return SIGTERM;
+    if (strcasecmp(name, "URG") == 0) return SIGURG;
+    if (strcasecmp(name, "STOP") == 0) return SIGSTOP;
+    if (strcasecmp(name, "TSTP") == 0) return SIGTSTP;
+    if (strcasecmp(name, "CONT") == 0) return SIGCONT;
+    if (strcasecmp(name, "CHLD") == 0) return SIGCHLD;
+    if (strcasecmp(name, "TTIN") == 0) return SIGTTIN;
+    if (strcasecmp(name, "TTOU") == 0) return SIGTTOU;
+#ifdef SIGIO
+    if (strcasecmp(name, "IO") == 0) return SIGIO;
+#endif
+#ifdef SIGXCPU
+    if (strcasecmp(name, "XCPU") == 0) return SIGXCPU;
+#endif
+#ifdef SIGXFSZ
+    if (strcasecmp(name, "XFSZ") == 0) return SIGXFSZ;
+#endif
+#ifdef SIGVTALRM
+    if (strcasecmp(name, "VTALRM") == 0) return SIGVTALRM;
+#endif
+#ifdef SIGPROF
+    if (strcasecmp(name, "PROF") == 0) return SIGPROF;
+#endif
+#ifdef SIGWINCH
+    if (strcasecmp(name, "WINCH") == 0) return SIGWINCH;
+#endif
+    if (strcasecmp(name, "USR1") == 0) return SIGUSR1;
+    if (strcasecmp(name, "USR2") == 0) return SIGUSR2;
+
+    return -1;  // Unknown signal
+}
+
+int shell_kill(char **args) {
+    int sig = SIGTERM;  // Default signal
+    int start_idx = 1;
+
+    // Check for -l option (list signals)
+    if (args[1] && strcmp(args[1], "-l") == 0) {
+        printf("HUP INT QUIT ILL TRAP ABRT FPE KILL BUS SEGV SYS PIPE ALRM TERM\n");
+        printf("URG STOP TSTP CONT CHLD TTIN TTOU IO XCPU XFSZ VTALRM PROF WINCH USR1 USR2\n");
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // Parse signal specification
+    if (args[1] && args[1][0] == '-') {
+        const char *sigspec = args[1] + 1;
+
+        if (strcmp(sigspec, "s") == 0) {
+            // -s SIG format
+            if (!args[2]) {
+                fprintf(stderr, "%s: kill: -s requires an argument\n", HASH_NAME);
+                last_command_exit_code = 1;
+                return 1;
+            }
+            sigspec = args[2];
+            start_idx = 3;
+        } else {
+            start_idx = 2;
+        }
+
+        // Check if it's a number
+        char *endptr;
+        long num = strtol(sigspec, &endptr, 10);
+        if (*endptr == '\0') {
+            sig = (int)num;
+        } else {
+            // It's a signal name
+            sig = signal_name_to_number(sigspec);
+            if (sig == -1) {
+                fprintf(stderr, "%s: kill: %s: invalid signal specification\n", HASH_NAME, sigspec);
+                last_command_exit_code = 1;
+                return 1;
+            }
+        }
+    }
+
+    // No targets specified
+    if (!args[start_idx]) {
+        fprintf(stderr, "usage: kill [-s sigspec | -sigspec] pid | jobspec ...\n");
+        last_command_exit_code = 1;
+        return 1;
+    }
+
+    // Process each target
+    int result = 0;
+    for (int i = start_idx; args[i]; i++) {
+        pid_t pid = 0;
+        const char *target = args[i];
+
+        // Check for job specification
+        if (target[0] == '%') {
+            // Job specs only work when job control is enabled (set -m)
+            if (!shell_option_monitor()) {
+                fprintf(stderr, "%s: kill: %s: no job control\n", HASH_NAME, target);
+                result = 1;
+                continue;
+            }
+
+            const Job *job = NULL;
+            if (target[1] == '%' || target[1] == '+' || target[1] == '\0') {
+                // %%, %+, or just % - current job
+                job = jobs_get_current();
+            } else if (target[1] == '-') {
+                // %- - previous job (we don't track this, use current)
+                job = jobs_get_current();
+            } else if (isdigit(target[1])) {
+                // %n - job number
+                int job_id = atoi(target + 1);
+                job = jobs_get(job_id);
+            }
+
+            if (job) {
+                pid = job->pid;
+            } else {
+                fprintf(stderr, "%s: kill: %s: no such job\n", HASH_NAME, target);
+                result = 1;
+                continue;
+            }
+        } else {
+            // PID
+            char *endptr;
+            long num = strtol(target, &endptr, 10);
+            if (*endptr != '\0') {
+                fprintf(stderr, "%s: kill: %s: arguments must be process or job IDs\n", HASH_NAME, target);
+                result = 1;
+                continue;
+            }
+            pid = (pid_t)num;
+        }
+
+        // Send signal
+        if (kill(pid, sig) == -1) {
+            fprintf(stderr, "%s: kill: (%d) - %s\n", HASH_NAME, pid, strerror(errno));
+            result = 1;
+        }
+    }
+
+    last_command_exit_code = result;
+    return 1;
+}
+
+// ============================================================================
+// Command Hash Table (for hash builtin)
+// ============================================================================
+
+#define CMD_HASH_SIZE 64
+
+typedef struct CmdHashEntry {
+    char *name;
+    char *path;
+    int hits;
+    struct CmdHashEntry *next;
+} CmdHashEntry;
+
+static CmdHashEntry *cmd_hash_table[CMD_HASH_SIZE];
+
+// Simple hash function for command names
+static unsigned int cmd_hash_func(const char *s) {
+    unsigned int hash = 0;
+    while (*s) {
+        hash = hash * 31 + (unsigned char)*s++;
+    }
+    return hash % CMD_HASH_SIZE;
+}
+
+// Add a command to the hash table
+void cmd_hash_add(const char *name, const char *path) {
+    unsigned int h = cmd_hash_func(name);
+
+    // Check if already exists
+    CmdHashEntry *e = cmd_hash_table[h];
+    while (e) {
+        if (strcmp(e->name, name) == 0) {
+            // Update path if different
+            if (strcmp(e->path, path) != 0) {
+                free(e->path);
+                e->path = strdup(path);
+            }
+            e->hits++;
+            return;
+        }
+        e = e->next;
+    }
+
+    // Add new entry
+    CmdHashEntry *new_entry = malloc(sizeof(CmdHashEntry));
+    if (new_entry) {
+        new_entry->name = strdup(name);
+        new_entry->path = strdup(path);
+        new_entry->hits = 1;
+        new_entry->next = cmd_hash_table[h];
+        cmd_hash_table[h] = new_entry;
+    }
+}
+
+// Clear all entries from hash table
+static void cmd_hash_clear(void) {
+    for (int i = 0; i < CMD_HASH_SIZE; i++) {
+        CmdHashEntry *e = cmd_hash_table[i];
+        while (e) {
+            CmdHashEntry *next = e->next;
+            free(e->name);
+            free(e->path);
+            free(e);
+            e = next;
+        }
+        cmd_hash_table[i] = NULL;
+    }
+}
+
+// List all hashed commands
+static void cmd_hash_list(void) {
+    for (int i = 0; i < CMD_HASH_SIZE; i++) {
+        CmdHashEntry *e = cmd_hash_table[i];
+        while (e) {
+            printf("hits\tcommand\n");
+            break;  // Only print header once
+        }
+        if (cmd_hash_table[i]) break;
+    }
+
+    // Print header and entries
+    bool has_entries = false;
+    for (int i = 0; i < CMD_HASH_SIZE; i++) {
+        if (cmd_hash_table[i]) {
+            has_entries = true;
+            break;
+        }
+    }
+
+    if (has_entries) {
+        for (int i = 0; i < CMD_HASH_SIZE; i++) {
+            CmdHashEntry *e = cmd_hash_table[i];
+            while (e) {
+                printf("%4d\t%s\n", e->hits, e->path);
+                e = e->next;
+            }
+        }
+    }
+}
+
+int shell_hash(char **args) {
+    // hash with no args: list all hashed commands
+    if (args[1] == NULL) {
+        cmd_hash_list();
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // hash -r: clear hash table
+    if (strcmp(args[1], "-r") == 0) {
+        cmd_hash_clear();
+        last_command_exit_code = 0;
+        return 1;
+    }
+
+    // hash name [name...]: look up and hash commands
+    for (int i = 1; args[i]; i++) {
+        char *path = find_in_path(args[i]);
+        if (path) {
+            cmd_hash_add(args[i], path);
+            free(path);
+        } else {
+            fprintf(stderr, "%s: hash: %s: not found\n", HASH_NAME, args[i]);
+            last_command_exit_code = 1;
+            return 1;
+        }
+    }
+
+    last_command_exit_code = 0;
     return 1;
 }
 
@@ -819,4 +2111,18 @@ int try_builtin(char **args) {
     }
 
     return -1;
+}
+
+bool is_builtin(const char *cmd) {
+    if (cmd == NULL) {
+        return false;
+    }
+
+    for (int i = 0; i < num_builtins(); i++) {
+        if (strcmp(cmd, builtin_str[i]) == 0) {
+            return true;
+        }
+    }
+
+    return false;
 }
