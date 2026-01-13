@@ -68,21 +68,14 @@ char *varexpand_expand(const char *str, int last_exit_code) {
             result[out_pos++] = '\\';
             result[out_pos++] = *(p + 2);
             p += 3;
-        } else if (*p == '\x01' && *(p + 1) == '$') {
-            // Single-quoted dollar sign - output $ literally (no expansion)
+        } else if ((*p == '\x01' || *p == '\\') && *(p + 1) == '$') {
+            // Single-quoted or escaped dollar sign - output $ literally (no expansion)
             result[out_pos++] = '$';
             p += 2;
-        } else if (*p == '\\' && *(p + 1) == '$') {
-            // Escaped dollar sign - \$ → $
-            result[out_pos++] = '$';
-            p += 2;
-        } else if (*p == '\x02' && *(p + 1) == '$') {
-            // Quoted variable marker - skip marker and process $ with quote flag
-            p++;  // Skip \x02
-            goto process_var_quoted;
-        } else if (*p == '$') {
-process_var_quoted:;
-            bool is_quoted = (p > str && *(p - 1) == '\x02');  // Check if we came from marker
+        } else if ((*p == '\x02' && *(p + 1) == '$') || *p == '$') {
+            // Variable expansion - check for quoted marker first
+            bool is_quoted = (*p == '\x02');
+            if (is_quoted) p++;  // Skip \x02 marker if present
             p++;  // Skip $
 
             const char *var_value = NULL;
@@ -360,17 +353,7 @@ process_var_quoted:;
                                         }
                                     }
                                 } else {
-                                    // Shortest match - try from end backwards
-                                    for (size_t i = val_len; i > 0; i--) {
-                                        if (fnmatch(word, val + i - 1, 0) == 0) {
-                                            // Check if this is a valid suffix match
-                                            // (the pattern must match starting at position i-1)
-                                            if (fnmatch(word, val + i - 1, 0) == 0) {
-                                                keep_len = i - 1;
-                                            }
-                                        }
-                                    }
-                                    // Actually for %, we want shortest suffix that matches
+                                    // Shortest match - find shortest suffix that matches
                                     keep_len = val_len;
                                     for (size_t i = val_len; i > 0; i--) {
                                         if (fnmatch(word, val + i - 1, 0) == 0) {

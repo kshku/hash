@@ -452,10 +452,10 @@ int chain_execute(const CommandChain *chain) {
                                         if (*r == '&') {
                                             r++;
                                             if (*r == '-') { close(fd); r++; }
-                                            else { int src = atoi(r); while (isdigit(*r)) r++; dup2(src, fd); }
+                                            else { int src = atoi(r); while (isdigit(*r)) { r++; } dup2(src, fd); }
                                         } else {
                                             while (*r && isspace(*r)) r++;
-                                            char *fn = r;
+                                            const char *fn = r;
                                             while (*r && !isspace(*r)) r++;
                                             char sv = *r; *r = '\0';
                                             int nfd = open(fn, O_RDONLY);
@@ -470,10 +470,10 @@ int chain_execute(const CommandChain *chain) {
                                         if (*r == '&') {
                                             r++;
                                             if (*r == '-') { close(fd); r++; }
-                                            else { int src = atoi(r); while (isdigit(*r)) r++; dup2(src, fd); }
+                                            else { int src = atoi(r); while (isdigit(*r)) { r++; } dup2(src, fd); }
                                         } else {
                                             while (*r && isspace(*r)) r++;
-                                            char *fn = r;
+                                            const char *fn = r;
                                             while (*r && !isspace(*r)) r++;
                                             char sv = *r; *r = '\0';
                                             int fl = O_WRONLY | O_CREAT | (app ? O_APPEND : O_TRUNC);

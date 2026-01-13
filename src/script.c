@@ -882,11 +882,11 @@ static int execute_simple_line(const char *line) {
 
             // Extract the subshell content
             const char *start = line + 1;
-            size_t len = end_paren - start;
-            char *subshell_cmd = malloc(len + 1);
+            size_t subshell_len = end_paren - start;
+            char *subshell_cmd = malloc(subshell_len + 1);
             if (!subshell_cmd) return -1;
-            memcpy(subshell_cmd, start, len);
-            subshell_cmd[len] = '\0';
+            memcpy(subshell_cmd, start, subshell_len);
+            subshell_cmd[subshell_len] = '\0';
 
             // Check for redirections after the closing paren
             const char *after_paren = end_paren + 1;
@@ -951,7 +951,7 @@ static int execute_simple_line(const char *line) {
                                 } else {
                                     // Get filename
                                     while (*r && isspace(*r)) r++;
-                                    char *filename = r;
+                                    const char *filename = r;
                                     while (*r && !isspace(*r)) r++;
                                     char saved = *r;
                                     *r = '\0';
@@ -985,7 +985,7 @@ static int execute_simple_line(const char *line) {
                                 } else {
                                     // Get filename
                                     while (*r && isspace(*r)) r++;
-                                    char *filename = r;
+                                    const char *filename = r;
                                     while (*r && !isspace(*r)) r++;
                                     char saved = *r;
                                     *r = '\0';
@@ -1046,24 +1046,24 @@ static int execute_simple_line(const char *line) {
         while (*p && isspace(*p)) p++;
 
         // Find the closing } (might have & after it)
-        const char *end = line + strlen(line) - 1;
-        while (end > p && isspace(*end)) end--;
+        const char *brace_end = line + strlen(line) - 1;
+        while (brace_end > p && isspace(*brace_end)) brace_end--;
 
         // Check for background operator
         bool background = false;
-        if (*end == '&') {
+        if (*brace_end == '&') {
             background = true;
-            end--;
-            while (end > p && isspace(*end)) end--;
+            brace_end--;
+            while (brace_end > p && isspace(*brace_end)) brace_end--;
         }
 
-        if (*end == '}') {
+        if (*brace_end == '}') {
             // Extract the brace group content
-            size_t len = end - p;
-            char *group_cmd = malloc(len + 1);
+            size_t group_len = brace_end - p;
+            char *group_cmd = malloc(group_len + 1);
             if (!group_cmd) return -1;
-            memcpy(group_cmd, p, len);
-            group_cmd[len] = '\0';
+            memcpy(group_cmd, p, group_len);
+            group_cmd[group_len] = '\0';
 
             if (background) {
                 // Flush stdout/stderr before forking to prevent child from

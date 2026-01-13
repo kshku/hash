@@ -30,6 +30,8 @@ int last_command_exit_code = 0;
 
 // Launch an external program
 static int launch(char **args, const char *cmd_string) {
+    if (!args || !args[0]) return 1;
+
     pid_t pid;
     int status;
 
@@ -94,6 +96,9 @@ static int launch(char **args, const char *cmd_string) {
         }
 
         // Execute command
+        if (!exec_args || !exec_args[0]) {
+            _exit(EXIT_FAILURE);
+        }
         if (execvp(exec_args[0], exec_args) == -1) {
             if (!script_state.silent_errors) {
                 perror(HASH_NAME);
