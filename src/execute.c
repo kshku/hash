@@ -70,6 +70,9 @@ static int launch(char **args, const char *cmd_string) {
     // Use cleaned args (or original if no redirections)
     char **exec_args = redir ? redir->args : args;
 
+    // Strip quote markers after redirect parsing (for external commands)
+    strip_quote_markers_args(exec_args);
+
     // Find and cache the command path before forking
     char *cmd_path = NULL;
     if (exec_args[0] && strchr(exec_args[0], '/') == NULL) {
@@ -80,8 +83,10 @@ static int launch(char **args, const char *cmd_string) {
     if (pid == 0) {
         // Child process
 
-        // Put child in its own process group
-        setpgid(0, 0);
+        // Put child in its own process group (only in interactive mode)
+        if (is_interactive) {
+            setpgid(0, 0);
+        }
 
         // Restore default signal handlers in child
         signal(SIGINT, SIG_DFL);
@@ -116,30 +121,35 @@ static int launch(char **args, const char *cmd_string) {
     } else {
         // Parent process
 
-        // Put child in its own process group
-        setpgid(pid, pid);
-
-        // Block SIGCHLD while waiting for foreground process
-        // This prevents the SIGCHLD handler from reaping our child
+        // Job control setup only in interactive mode
         sigset_t block_mask, old_mask;
-        sigemptyset(&block_mask);
-        sigaddset(&block_mask, SIGCHLD);
-        sigprocmask(SIG_BLOCK, &block_mask, &old_mask);
+        if (is_interactive) {
+            // Put child in its own process group
+            setpgid(pid, pid);
 
-        // Give terminal control to child process group
-        tcsetpgrp(STDIN_FILENO, pid);
+            // Block SIGCHLD while waiting for foreground process
+            // This prevents the SIGCHLD handler from reaping our child
+            sigemptyset(&block_mask);
+            sigaddset(&block_mask, SIGCHLD);
+            sigprocmask(SIG_BLOCK, &block_mask, &old_mask);
+
+            // Give terminal control to child process group
+            tcsetpgrp(STDIN_FILENO, pid);
+        }
 
         // Wait for child, but also handle stopped state
         pid_t wpid;
         do {
-            wpid = waitpid(pid, &status, WUNTRACED);
+            wpid = waitpid(pid, &status, is_interactive ? WUNTRACED : 0);
         } while (wpid == -1 && errno == EINTR);
 
-        // Take back terminal control
-        tcsetpgrp(STDIN_FILENO, getpgrp());
+        if (is_interactive) {
+            // Take back terminal control
+            tcsetpgrp(STDIN_FILENO, getpgrp());
 
-        // Restore SIGCHLD handling
-        sigprocmask(SIG_SETMASK, &old_mask, NULL);
+            // Restore SIGCHLD handling
+            sigprocmask(SIG_SETMASK, &old_mask, NULL);
+        }
 
         // Handle the result
         if (wpid > 0) {
@@ -338,8 +348,38 @@ int execute(char **args) {
         arg_count++;
     }
 
-    // Expand tilde in all arguments
+    // Expand tilde in all arguments (for args starting with ~)
     expand_tilde(args);
+
+    // Also expand tildes in assignment values BEFORE command substitution
+    // This is the correct POSIX order: tilde expansion before cmdsub
+    for (int i = 0; i < arg_count; i++) {
+        char *eq = is_var_assignment(args[i]);
+        if (eq) {
+            // This is an assignment - expand tildes in the value part
+            char *value = eq + 1;
+            char *tilde_exp = expand_tilde_in_assignment(value);
+            if (tilde_exp) {
+                // Build new argument with expanded value
+                size_t name_len = eq - args[i] + 1;  // includes '='
+                size_t new_len = name_len + strlen(tilde_exp) + 1;
+                char *new_arg = malloc(new_len);
+                if (new_arg) {
+                    memcpy(new_arg, args[i], name_len);
+                    strcpy(new_arg + name_len, tilde_exp);
+                    // Track if we need to free the original
+                    if (args[i] != original_ptrs[i]) {
+                        // Already expanded, free the old one
+                        free(args[i]);
+                    }
+                    args[i] = new_arg;
+                    expanded_args[expanded_count++] = new_arg;
+                    original_ptrs[i] = new_arg;
+                }
+                free(tilde_exp);
+            }
+        }
+    }
 
     // Track which args were expanded by tilde
     for (int i = 0; i < arg_count; i++) {
@@ -439,8 +479,8 @@ int execute(char **args) {
     // Use expanded args if glob expansion happened, otherwise use original args
     char **exec_input = glob_expanded ? glob_args : args;
 
-    // Strip quote markers from arguments (markers prevent glob expansion of quoted chars)
-    strip_quote_markers_args(exec_input);
+    // Note: Don't strip quote markers here - they're needed for redirect parsing in launch()
+    // Markers will be stripped in launch() after redirections are parsed
 
     // Handle variable assignments
     // Count leading VAR=VALUE assignments
@@ -456,17 +496,14 @@ int execute(char **args) {
             char *equals = is_var_assignment(exec_input[i]);
             *equals = '\0';
             const char *name = exec_input[i];
-            const char *value = equals + 1;
+            char *value = equals + 1;
 
-            // Expand tildes in the value (for PATH-like assignments)
-            char *tilde_expanded = expand_tilde_in_assignment(value);
-            int result;
-            if (tilde_expanded) {
-                result = shellvar_set(name, tilde_expanded);
-                free(tilde_expanded);
-            } else {
-                result = shellvar_set(name, value);
-            }
+            // Strip quote markers from value before storing
+            strip_quote_markers(value);
+
+            // Tilde expansion already happened BEFORE command substitution
+            // (in the earlier expansion phase), so just use the value directly
+            int result = shellvar_set(name, value);
             if (result < 0) {
                 assignment_failed = 1;
                 // In non-interactive mode, readonly assignment error should exit
@@ -502,7 +539,10 @@ int execute(char **args) {
             char *equals = is_var_assignment(exec_input[i]);
             *equals = '\0';
             const char *name = exec_input[i];
-            const char *value = equals + 1;
+            char *value = equals + 1;
+
+            // Strip quote markers from value before storing
+            strip_quote_markers(value);
 
             // Save old value for restoration
             save_prefix_var(name);
@@ -617,6 +657,12 @@ int execute(char **args) {
 
     // Check if this is a builtin first (without executing it)
     int is_builtin_cmd = exec_args[0] ? is_builtin(exec_args[0]) : 0;
+
+    // Strip quote markers only for builtins
+    // External commands go through launch() which does its own redirect parsing and marker stripping
+    if (is_builtin_cmd) {
+        strip_quote_markers_args(exec_args);
+    }
 
     // Check if this is a builtin that must NOT run in a child process
     // These include:
