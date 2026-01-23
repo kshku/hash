@@ -169,12 +169,16 @@ static int heredoc_append(const char *line, int strip_tabs) {
 }
 
 // Read a complete line from file, handling backslash-newline continuations
+// and multi-line quoted strings
 // Returns dynamically allocated string (caller must free), or NULL on EOF/error
 static char *read_complete_line(FILE *fp) {
     char *result = NULL;
     size_t result_len = 0;
     size_t result_cap = 0;
     char buf[MAX_SCRIPT_LINE];
+    bool in_single_quote = false;
+    bool in_double_quote = false;
+    int brace_depth = 0;  // Track ${...} depth - # inside braces is not a comment
 
     while (fgets(buf, sizeof(buf), fp)) {
         size_t len = strlen(buf);
@@ -193,16 +197,52 @@ static char *read_complete_line(FILE *fp) {
             result_cap = new_cap;
         }
 
-        // Append buffer to result
-        memcpy(result + result_len, buf, len);
-        result_len += len;
+        // Append buffer to result and track quote state
+        bool in_comment = false;
+        for (size_t i = 0; i < len; i++) {
+            char c = buf[i];
+            result[result_len++] = c;
+
+            // Once in a comment, stop tracking quotes (comments end at newline)
+            if (in_comment) {
+                continue;
+            }
+
+            // Track quote state
+            // Backslash escapes next character when not in single quotes
+            if (c == '\\' && !in_single_quote && i + 1 < len) {
+                i++;
+                result[result_len++] = buf[i];
+                continue;
+            }
+            if (c == '\'' && !in_double_quote) {
+                in_single_quote = !in_single_quote;
+            } else if (c == '"' && !in_single_quote) {
+                in_double_quote = !in_double_quote;
+            } else if (c == '{' && !in_single_quote) {
+                brace_depth++;
+            } else if (c == '}' && !in_single_quote && brace_depth > 0) {
+                brace_depth--;
+            } else if (c == '#' && !in_single_quote && !in_double_quote && brace_depth == 0) {
+                // Start of comment - stop tracking quotes for rest of line
+                in_comment = true;
+            }
+        }
         result[result_len] = '\0';
 
         // Check for line continuation (backslash before newline)
-        if (result_len >= 2 && result[result_len - 1] == '\n' && result[result_len - 2] == '\\') {
+        // Only do continuation when not inside single quotes
+        // (POSIX: \<newline> is literal inside single quotes, continuation elsewhere)
+        if (result_len >= 2 && result[result_len - 1] == '\n' && result[result_len - 2] == '\\' &&
+            !in_single_quote) {
             // Remove backslash-newline and continue reading
             result_len -= 2;
             result[result_len] = '\0';
+            continue;
+        }
+
+        // Continue reading if we're inside a quote (to complete multi-line strings)
+        if (in_single_quote || in_double_quote) {
             continue;
         }
 
@@ -2247,6 +2287,54 @@ static int append_to_case_body(ScriptContext *ctx, const char *line) {
     return append_to_loop_body(ctx, line);  // Same implementation
 }
 
+// Find the next logical line boundary (newline not inside quotes)
+// Returns pointer to the newline, or NULL if not found
+static char *find_logical_line_end(char *str) {
+    if (!str) return NULL;
+
+    bool in_single = false;
+    bool in_double = false;
+
+    for (char *p = str; *p; p++) {
+        if (*p == '\\' && !in_single && *(p + 1)) {
+            p++;  // Skip escaped character
+            continue;
+        }
+        if (*p == '\'' && !in_double) {
+            in_single = !in_single;
+        } else if (*p == '"' && !in_single) {
+            in_double = !in_double;
+        } else if (*p == '\n' && !in_single && !in_double) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+// Find closing ) that's not inside quotes
+// Returns pointer to the ), or NULL if not found
+static char *find_unquoted_close_paren(char *str) {
+    if (!str) return NULL;
+
+    bool in_single = false;
+    bool in_double = false;
+
+    for (char *p = str; *p; p++) {
+        if (*p == '\\' && !in_single && *(p + 1)) {
+            p++;  // Skip escaped character
+            continue;
+        }
+        if (*p == '\'' && !in_double) {
+            in_single = !in_single;
+        } else if (*p == '"' && !in_single) {
+            in_double = !in_double;
+        } else if (*p == ')' && !in_single && !in_double) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
 // Check if a pattern matches a word using fnmatch
 // Handles POSIX shell pattern matching with *, ?, [...]
 static bool case_pattern_matches(const char *pattern, const char *word) {
@@ -2268,12 +2356,12 @@ static int execute_case_body(const char *body, const char *word) {
     char *body_copy = strdup(body);
     if (!body_copy) return 1;
 
-    const char *line = body_copy;
+    char *line = body_copy;
     char *next_line;
 
     while (line && *line) {
-        // Find end of current line
-        next_line = strchr(line, '\n');
+        // Find end of current logical line (respecting quotes)
+        next_line = find_logical_line_end((char *)line);
         if (next_line) {
             *next_line = '\0';
             next_line++;
@@ -2292,7 +2380,7 @@ static int execute_case_body(const char *body, const char *word) {
         // Pattern format: pattern) or (pattern) or pattern|pattern)
         // Skip if we're in a matched clause executing commands
 
-        const char *trimmed = line;
+        char *trimmed = line;
         while (*trimmed && isspace(*trimmed)) trimmed++;
 
         // Check for ;; which ends a clause
@@ -2332,15 +2420,15 @@ static int execute_case_body(const char *body, const char *word) {
         // Not in a matched clause - this should be a pattern
         // Look for pattern ending with )
         // Skip leading ( if present
-        const char *p = trimmed;
+        char *p = trimmed;
         if (*p == '(') {
             p++;
             while (*p && isspace(*p)) p++;
         }
 
-        // Find the closing ) for this pattern
+        // Find the closing ) for this pattern (respecting quotes)
         // Need to handle patterns with | separators
-        close_paren = strchr(p, ')');
+        close_paren = find_unquoted_close_paren(p);
         if (!close_paren) {
             // Not a valid pattern line, treat as command (shouldn't happen in valid case)
             line = next_line;
@@ -2533,6 +2621,94 @@ static char *remove_shell_quotes(const char *str) {
     return result;
 }
 
+// Remove shell quotes for case patterns - similar to remove_shell_quotes but
+// escapes backslashes that are meant to be literal (from inside single quotes)
+// so fnmatch treats them correctly
+static char *remove_shell_quotes_for_pattern(const char *str) {
+    if (!str) return strdup("");
+
+    size_t len = strlen(str);
+    // Worst case: every char is a backslash that needs escaping
+    char *result = malloc(len * 2 + 1);
+    if (!result) return strdup("");
+
+    size_t j = 0;
+    bool in_single = false;
+    bool in_double = false;
+
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+
+        // Handle \x01 marker - next char is literal (from expansion)
+        // Need to escape if it's a backslash
+        if (c == '\x01' && str[i + 1]) {
+            i++;  // Skip marker
+            if (str[i] == '\\') {
+                result[j++] = '\\';  // Escape for fnmatch
+            }
+            result[j++] = str[i];  // Copy literal character
+            continue;
+        }
+
+        if (c == '\'' && !in_double) {
+            // Single quote - toggle state, don't output the quote
+            in_single = !in_single;
+            continue;
+        }
+
+        if (c == '"' && !in_single) {
+            // Double quote - toggle state, don't output the quote
+            in_double = !in_double;
+            continue;
+        }
+
+        if (c == '\\') {
+            if (in_single) {
+                // Inside single quotes, backslash is literal - escape for fnmatch
+                result[j++] = '\\';
+                result[j++] = '\\';
+                continue;
+            } else if (str[i + 1]) {
+                // Backslash escape outside single quotes
+                if (in_double) {
+                    // In double quotes, backslash only escapes $ ` " \ newline
+                    char next = str[i + 1];
+                    if (next == '$' || next == '`' || next == '"' ||
+                        next == '\\' || next == '\n') {
+                        i++;  // Skip backslash
+                        if (next == '\\') {
+                            // Escaped backslash - output as escaped for fnmatch
+                            result[j++] = '\\';
+                            result[j++] = '\\';
+                        } else if (next != '\n') {  // Backslash-newline is removed
+                            result[j++] = next;
+                        }
+                        continue;
+                    }
+                    // Other backslashes in double quotes are literal
+                    result[j++] = '\\';
+                    result[j++] = '\\';
+                    continue;
+                } else {
+                    // Outside quotes, backslash escapes the next character
+                    // Keep the escape sequence for fnmatch
+                    result[j++] = '\\';
+                    i++;
+                    if (str[i] != '\n') {  // Backslash-newline is removed
+                        result[j++] = str[i];
+                    }
+                    continue;
+                }
+            }
+        }
+
+        result[j++] = c;
+    }
+
+    result[j] = '\0';
+    return result;
+}
+
 // Pre-process word to add \x02 markers before $ inside double quotes
 // This tells varexpand that the expansion is in a quoted context
 static char *add_quote_markers(const char *word) {
@@ -2696,15 +2872,21 @@ static char *expand_case_pattern(const char *pattern) {
         result = arith;
     }
 
-    // Apply variable expansion
-    char *varexp = varexpand_expand(result, last_command_exit_code);
-    if (varexp) {
-        free(result);
-        result = varexp;
+    // Apply variable expansion only if there's a $ to expand
+    // Skip varexpand for patterns without $ to avoid its \\ processing
+    // which interferes with quote removal
+    bool has_dollar = (strchr(result, '$') != NULL);
+    if (has_dollar) {
+        char *varexp = varexpand_expand(result, last_command_exit_code);
+        if (varexp) {
+            free(result);
+            result = varexp;
+        }
     }
 
     // Remove shell quotes (quote removal phase)
-    char *unquoted = remove_shell_quotes(result);
+    // Use pattern-specific version that escapes literal backslashes for fnmatch
+    char *unquoted = remove_shell_quotes_for_pattern(result);
     if (unquoted) {
         free(result);
         result = unquoted;
@@ -3284,6 +3466,8 @@ int script_execute_file_ex(const char *filepath, int argc, char **argv, bool sil
 }
 
 // Preprocess script to handle backslash-newline continuations
+// Respects quote context: \<newline> is literal inside single quotes
+// Also respects comments: quotes inside comments are ignored
 // Returns newly allocated string (caller must free)
 static char *preprocess_line_continuations(const char *script) {
     if (!script) return NULL;
@@ -3292,15 +3476,52 @@ static char *preprocess_line_continuations(const char *script) {
     char *result = malloc(len + 1);
     if (!result) return NULL;
 
+    bool in_single_quote = false;
+    bool in_double_quote = false;
+    bool in_comment = false;
+    int brace_depth = 0;  // Track ${...} depth - # inside braces is not a comment
+
     size_t j = 0;
     for (size_t i = 0; i < len; i++) {
+        char c = script[i];
+
+        // Comments end at newline
+        if (in_comment) {
+            result[j++] = c;
+            if (c == '\n') {
+                in_comment = false;
+            }
+            continue;
+        }
+
         // Check for backslash-newline (line continuation)
-        if (script[i] == '\\' && i + 1 < len && script[i + 1] == '\n') {
+        // Only remove when not inside single quotes
+        if (c == '\\' && i + 1 < len && script[i + 1] == '\n' && !in_single_quote) {
             // Skip both backslash and newline
             i++;  // Skip newline (loop will advance past backslash)
             continue;
         }
-        result[j++] = script[i];
+
+        result[j++] = c;
+
+        // Track quote state
+        // Backslash escapes next character when not in single quotes
+        if (c == '\\' && !in_single_quote && i + 1 < len) {
+            i++;
+            result[j++] = script[i];
+            continue;
+        }
+        if (c == '\'' && !in_double_quote) {
+            in_single_quote = !in_single_quote;
+        } else if (c == '"' && !in_single_quote) {
+            in_double_quote = !in_double_quote;
+        } else if (c == '{' && !in_single_quote) {
+            brace_depth++;
+        } else if (c == '}' && !in_single_quote && brace_depth > 0) {
+            brace_depth--;
+        } else if (c == '#' && !in_single_quote && !in_double_quote && brace_depth == 0) {
+            in_comment = true;
+        }
     }
     result[j] = '\0';
     return result;
