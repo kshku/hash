@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,8 @@
 #include <termios.h>
 #include <ctype.h>
 #include <sys/ioctl.h>
+#include <wchar.h>
+#include <locale.h>
 #include "lineedit.h"
 #include "hash.h"
 #include "safe_string.h"
@@ -171,59 +174,176 @@ static int get_terminal_width(void) {
     return ws.ws_col;
 }
 
-// Calculate visible length of prompt (excluding ANSI escape sequences)
+// Decode a UTF-8 character and return its byte length (1-4), or 0 on error
+// Also returns the decoded codepoint via the wc parameter
+static int utf8_decode(const unsigned char *p, wchar_t *wc) {
+    if (!p || !*p) return 0;
+
+    if (*p < 0x80) {
+        // ASCII
+        *wc = *p;
+        return 1;
+    } else if ((*p & 0xE0) == 0xC0) {
+        // 2-byte sequence
+        if ((p[1] & 0xC0) != 0x80) return 0;
+        *wc = ((p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+        return 2;
+    } else if ((*p & 0xF0) == 0xE0) {
+        // 3-byte sequence
+        if ((p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80) return 0;
+        *wc = ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+        return 3;
+    } else if ((*p & 0xF8) == 0xF0) {
+        // 4-byte sequence
+        if ((p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80 || (p[3] & 0xC0) != 0x80) return 0;
+        *wc = ((p[0] & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+        return 4;
+    }
+    return 0;
+}
+
+// Calculate visible length of prompt's LAST LINE (excluding ANSI escape sequences)
+// For multi-line prompts, only the last line affects cursor positioning
+// Uses wcwidth() to properly handle wide characters
 static size_t visible_prompt_length(const char *prompt) {
     if (!prompt) return 0;
 
+    // Find the last newline - we only care about the last line
+    const char *last_newline = strrchr(prompt, '\n');
+    const char *start = last_newline ? last_newline + 1 : prompt;
+
     size_t visible = 0;
-    const char *p = prompt;
+    const unsigned char *p = (const unsigned char *)start;
     int in_escape = 0;
 
     while (*p) {
         if (*p == '\x1b') {
+            // Start of ANSI escape sequence
             in_escape = 1;
+            p++;
+            // Skip CSI introducer '[' if present
+            if (*p == '[') {
+                p++;
+            }
         } else if (in_escape) {
-            if (*p == 'm') {
+            // Inside escape sequence - skip until we hit the final byte
+            // CSI sequences end with a byte in range 0x40-0x7E (@ through ~)
+            if (*p >= 0x40 && *p <= 0x7E) {
                 in_escape = 0;
             }
+            p++;
+        } else if (*p >= 0x80) {
+            // UTF-8 multi-byte character - use wcwidth for display width
+            wchar_t wc;
+            int len = utf8_decode(p, &wc);
+            if (len > 0) {
+                int width = wcwidth(wc);
+                // wcwidth returns -1 for non-printable/unknown chars
+                // Default to width 1 for unknown printable chars
+                if (width < 0) width = 1;
+                visible += (size_t)width;
+                p += len;
+            } else {
+                // Invalid UTF-8, skip byte
+                p++;
+            }
         } else {
+            // Regular ASCII character
             visible++;
+            p++;
         }
-        p++;
     }
 
     return visible;
 }
 
-// Refresh the line on screen
+// Count the number of newlines in a string (to determine prompt line count)
+static int count_newlines(const char *str) {
+    if (!str) return 0;
+
+    int count = 0;
+    while (*str) {
+        if (*str == '\n') count++;
+        str++;
+    }
+    return count;
+}
+
+// Write string to stdout, converting \n to \r\n for raw mode
+// In raw mode, \n only moves down without returning to column 0
+static void write_with_crlf(const char *str) {
+    if (!str) return;
+
+    ssize_t ret;
+    const char *p = str;
+    const char *start = str;
+
+    while (*p) {
+        if (*p == '\n') {
+            // Write everything before the newline
+            if (p > start) {
+                ret = write(STDOUT_FILENO, start, (size_t)(p - start));
+                (void)ret;
+            }
+            // Write \r\n instead of just \n
+            ret = write(STDOUT_FILENO, "\r\n", 2);
+            (void)ret;
+            start = p + 1;
+        }
+        p++;
+    }
+
+    // Write any remaining content after the last newline
+    if (p > start) {
+        ret = write(STDOUT_FILENO, start, (size_t)(p - start));
+        (void)ret;
+    }
+}
+
+// Refresh the line on screen (supports multi-line prompts)
 static void refresh_line(const char *buf, size_t len, size_t pos, const char *prompt) {
     ssize_t ret;
+    int prompt_lines = count_newlines(prompt);
+
+    // For multi-line prompts, move cursor up to where the prompt started
+    if (prompt_lines > 0) {
+        char up_seq[32];
+        snprintf(up_seq, sizeof(up_seq), "\x1b[%dA", prompt_lines);
+        ret = write(STDOUT_FILENO, up_seq, strlen(up_seq));
+        (void)ret;
+    }
+
     // Move cursor to beginning of line
     ret = write(STDOUT_FILENO, "\r", 1);
     (void)ret;
 
-    // Clear line
-    ret = write(STDOUT_FILENO, "\x1b[K", 3);
+    // Clear from cursor to end of screen (handles multi-line prompts)
+    ret = write(STDOUT_FILENO, "\x1b[J", 3);
     (void)ret;
 
-    // Write prompt and current buffer
-    ret = write(STDOUT_FILENO, prompt, strlen(prompt));
-    (void)ret;
+    // Write prompt (with proper newline handling) and current buffer
+    write_with_crlf(prompt);
     ret = write(STDOUT_FILENO, buf, len);
     (void)ret;
 
-    // Move cursor to correct position
-    size_t visible_prompt = visible_prompt_length(prompt);
-    size_t cursor_col = visible_prompt + pos;
-    char cursor_seq[32];
-    snprintf(cursor_seq, sizeof(cursor_seq), "\r\x1b[%zuC", cursor_col);
-    ret = write(STDOUT_FILENO, cursor_seq, safe_strlen(cursor_seq, sizeof(cursor_seq)));
-    (void)ret;
+    // Only reposition cursor if it's not at the end of the buffer
+    // When pos == len, cursor is already where it should be after writing
+    if (pos < len) {
+        // Move cursor to correct position on the last line
+        // Use absolute column positioning (CHA - \x1b[nG) which is 1-indexed
+        size_t visible_prompt = visible_prompt_length(prompt);
+        size_t cursor_col = visible_prompt + pos + 1;  // +1 because CHA is 1-indexed
+        char cursor_seq[32];
+        snprintf(cursor_seq, sizeof(cursor_seq), "\x1b[%zuG", cursor_col);
+        ret = write(STDOUT_FILENO, cursor_seq, safe_strlen(cursor_seq, sizeof(cursor_seq)));
+        (void)ret;
+    }
 }
 
 // Initialize line editor
 void lineedit_init(void) {
-    // Nothing to do here yet
+    // Set locale for proper wcwidth() behavior with Unicode
+    setlocale(LC_CTYPE, "");
 }
 
 // Cleanup line editor
@@ -268,9 +388,9 @@ char *lineedit_read_line(const char *prompt) {
     }
 
     // Display prompt after entering raw mode
+    // Use write_with_crlf to handle newlines properly in raw mode
     if (prompt) {
-        ret = write(STDOUT_FILENO, prompt, safe_strlen(prompt, 2048));
-        (void)ret;
+        write_with_crlf(prompt);
         fflush(stdout);
     }
 
