@@ -300,12 +300,84 @@ static void write_with_crlf(const char *str) {
     }
 }
 
-// Refresh the line on screen (supports multi-line prompts)
-static void refresh_line(const char *buf, size_t len, size_t pos, const char *prompt) {
-    ssize_t ret;
-    int prompt_lines = count_newlines(prompt);
+// Set the cursor to given position (assumes cursor is at last line)
+static void set_cursor(const char *buf, size_t pos, size_t prev_pos,
+        const char *prompt) {
+    size_t ret;
 
-    // For multi-line prompts, move cursor up to where the prompt started
+    // Only reposition cursor if it's not at the desired position
+    if (prev_pos == pos) return;
+
+    size_t count = 0;
+    if (prev_pos > pos) {
+        // Calculate how many lines to go up
+        for (ssize_t i = prev_pos; i >= (ssize_t)pos; --i) {
+            if (buf[i] == '\n') ++count;
+        }
+    } else {
+        // calculate how many lines to go down
+        for (size_t i = prev_pos; i <= pos; ++i) {
+            if (buf[i] == '\n') ++count;
+        }
+    }
+
+    char cursor_seq[32];
+
+    if (count > 0) {
+        // Move cursor that many lines up
+        snprintf(cursor_seq, sizeof(cursor_seq),
+                (prev_pos > pos) ? "\x1b[%zuA" : "\x1b[%zuB", count);
+        ret = write(STDOUT_FILENO, cursor_seq, safe_strlen(cursor_seq, sizeof(cursor_seq)));
+        (void)ret;
+    }
+
+    int begin = 0;
+    if (pos > 0) {
+        // Move cursor to correct position on that line
+        // Count number of cols to move to right
+        for (size_t i = pos - 1; i > 0; --i) {
+            if (buf[i] == '\n') {
+                begin = i + 1;
+                break;
+            }
+        }
+    }
+
+    // Move cursor to the begining of line
+    ret = write(STDOUT_FILENO, "\r", 1);
+    (void)ret;
+
+    if (begin == 0) {
+        // Skip the prompt
+        size_t visible_prompt = visible_prompt_length(prompt);
+        snprintf(cursor_seq, sizeof(cursor_seq), "\x1b[%zuC", visible_prompt);
+        ret = write(STDOUT_FILENO, cursor_seq, safe_strlen(cursor_seq, sizeof(cursor_seq)));
+        (void)ret;
+    }
+
+    if (pos - begin > 0) {
+        // Go to pos
+        snprintf(cursor_seq, sizeof(cursor_seq), "\x1b[%zuC", (pos - begin));
+        ret = write(STDOUT_FILENO, cursor_seq, safe_strlen(cursor_seq, sizeof(cursor_seq)));
+        (void)ret;
+    }
+}
+
+// Refresh the line on screen (supports multi-line prompt and buffer)
+static void refresh_line(const char *buf, size_t len, size_t pos, const char *prompt,
+        int prev_buffer_lines) {
+    ssize_t ret;
+
+    // Count how many lines up the cursor is
+    int count = 0;
+    for (ssize_t i = len - 1; i >= (ssize_t)pos; --i) {
+        if (buf[i] == '\n') ++count;
+    }
+
+    // Count new lines in prompt and previous buffer
+    int prompt_lines = count_newlines(prompt) + prev_buffer_lines - count;
+
+    // For multi-line prompt and buffer, move cursor up to where the prompt started
     if (prompt_lines > 0) {
         char up_seq[32];
         snprintf(up_seq, sizeof(up_seq), "\x1b[%dA", prompt_lines);
@@ -321,23 +393,11 @@ static void refresh_line(const char *buf, size_t len, size_t pos, const char *pr
     ret = write(STDOUT_FILENO, "\x1b[J", 3);
     (void)ret;
 
-    // Write prompt (with proper newline handling) and current buffer
+    // Write prompt and current buffer (with proper newline handling)
     write_with_crlf(prompt);
-    ret = write(STDOUT_FILENO, buf, len);
-    (void)ret;
+    write_with_crlf(buf);
 
-    // Only reposition cursor if it's not at the end of the buffer
-    // When pos == len, cursor is already where it should be after writing
-    if (pos < len) {
-        // Move cursor to correct position on the last line
-        // Use absolute column positioning (CHA - \x1b[nG) which is 1-indexed
-        size_t visible_prompt = visible_prompt_length(prompt);
-        size_t cursor_col = visible_prompt + pos + 1;  // +1 because CHA is 1-indexed
-        char cursor_seq[32];
-        snprintf(cursor_seq, sizeof(cursor_seq), "\x1b[%zuG", cursor_col);
-        ret = write(STDOUT_FILENO, cursor_seq, safe_strlen(cursor_seq, sizeof(cursor_seq)));
-        (void)ret;
-    }
+    set_cursor(buf, pos, len, prompt);
 }
 
 // Initialize line editor
@@ -395,6 +455,7 @@ char *lineedit_read_line(const char *prompt) {
     }
 
     const char *prompt_str = prompt ? prompt : "";
+    size_t newline_count = 0;
 
     while (1) {
         int c = read_key();
@@ -403,6 +464,23 @@ char *lineedit_read_line(const char *prompt) {
 
         switch (c) {
             case KEY_ENTER:
+                // Check for line continuation
+                if (buf[len - 1] == '\\') {
+                    last_was_tab = 0;
+                    if (len < MAX_LINE_LENGTH - 1) {
+                        buf[len] = '\n';
+                        len++;
+                        pos = len;
+                        buf[len] = '\0';
+                        newline_count++;
+
+                        // Write crlf to termial
+                        ret = write(STDOUT_FILENO, "\r\n", 2);
+                        (void)ret;
+                    }
+                    break;
+                }
+
                 disable_raw_mode();
 
                 // Ensure we're at the end of the line visually
@@ -445,17 +523,25 @@ char *lineedit_read_line(const char *prompt) {
             case KEY_BACKSPACE:
             case KEY_CTRL_H:
                 if (pos > 0) {
+                    char removed_char = buf[pos - 1];
                     memmove(buf + pos - 1, buf + pos, len - pos);
                     pos--;
                     len--;
                     buf[len] = '\0';
-                    refresh_line(buf, len, pos, prompt_str);
+                    refresh_line(buf, len, pos, prompt_str, newline_count);
+                    if (removed_char == '\n') newline_count--;
                 }
                 break;
 
             case 'C' + 256:  // Right arrow
                 if (pos < len) {
                     pos++;
+                    // If in the end of current line in multi line buffer, move to next line
+                    if (buf[pos - 1] == '\n') {
+                        ret = write(STDOUT_FILENO, "\x1b[E", 3);
+                        (void)ret;
+                        break;
+                    }
                     ret = write(STDOUT_FILENO, "\x1b[C", 3);
                     (void)ret;
                 }
@@ -464,6 +550,11 @@ char *lineedit_read_line(const char *prompt) {
             case 'D' + 256:  // Left arrow
                 if (pos > 0) {
                     pos--;
+                    // If n the begining of current line in multi line buffer, move to previous line
+                    if (buf[pos] == '\n') {
+                        set_cursor(buf, pos, pos + 1, prompt);
+                        break;
+                    }
                     ret = write(STDOUT_FILENO, "\x1b[D", 3);
                     (void)ret;
                 }
@@ -477,7 +568,9 @@ char *lineedit_read_line(const char *prompt) {
                         safe_strcpy(buf, prev, sizeof(buf));
                         len = safe_strlen(buf, sizeof(buf));
                         pos = len;
-                        refresh_line(buf, len, pos, prompt_str);
+                        refresh_line(buf, len, pos, prompt_str, newline_count);
+                        // update the new line count to match current buffer
+                        newline_count = count_newlines(buf);
                     }
                 }
                 break;
@@ -490,20 +583,24 @@ char *lineedit_read_line(const char *prompt) {
                         safe_strcpy(buf, next, sizeof(buf));
                         len = safe_strlen(buf, sizeof(buf));
                         pos = len;
-                        refresh_line(buf, len, pos, prompt_str);
+                        refresh_line(buf, len, pos, prompt_str, newline_count);
+                        // update the new line count to match current buffer
+                        newline_count = count_newlines(buf);
                     } else {
                         // At end of history, clear line
                         len = 0;
                         pos = 0;
                         buf[0] = '\0';
-                        refresh_line(buf, len, pos, prompt_str);
+                        refresh_line(buf, len, pos, prompt_str, newline_count);
+                        // update the new line count
+                        newline_count = 0;
                     }
                 }
                 break;
 
             case KEY_CTRL_A:  // Beginning
                 last_was_tab = 0;
-                while (pos > 0) {
+                while (pos > 0 && buf[pos - 1] != '\n') {
                     pos--;
                     ret = write(STDOUT_FILENO, "\x1b[D", 3);
                     (void)ret;
@@ -512,7 +609,7 @@ char *lineedit_read_line(const char *prompt) {
 
             case KEY_CTRL_E:  // End
                 last_was_tab = 0;
-                while (pos < len) {
+                while (pos < len && buf[pos + 1] != '\n') {
                     pos++;
                     ret = write(STDOUT_FILENO, "\x1b[C", 3);
                     (void)ret;
@@ -526,7 +623,8 @@ char *lineedit_read_line(const char *prompt) {
                     len -= pos;
                     pos = 0;
                     buf[len] = '\0';
-                    refresh_line(buf, len, pos, prompt_str);
+                    refresh_line(buf, len, pos, prompt_str, newline_count);
+                    newline_count = count_newlines(buf);
                 }
                 break;
 
@@ -534,7 +632,8 @@ char *lineedit_read_line(const char *prompt) {
                 last_was_tab = 0;
                 len = pos;
                 buf[len] = '\0';
-                refresh_line(buf, len, pos, prompt_str);
+                refresh_line(buf, len, pos, prompt_str, newline_count);
+                newline_count = count_newlines(buf);
                 break;
 
             case KEY_CTRL_W:  // Delete word backward
@@ -553,7 +652,8 @@ char *lineedit_read_line(const char *prompt) {
                     memmove(buf + pos, buf + old_pos, len - old_pos);
                     len -= (old_pos - pos);
                     buf[len] = '\0';
-                    refresh_line(buf, len, pos, prompt_str);
+                    refresh_line(buf, len, pos, prompt_str, newline_count);
+                    newline_count = count_newlines(buf);
                 }
                 break;
 
@@ -561,7 +661,8 @@ char *lineedit_read_line(const char *prompt) {
                 last_was_tab = 0;
                 ret = write(STDOUT_FILENO, "\x1b[H\x1b[2J", 7);
                 (void)ret;
-                refresh_line(buf, len, pos, prompt_str);
+                refresh_line(buf, len, pos, prompt_str, newline_count);
+                newline_count = count_newlines(buf);
                 break;
 
             case KEY_TAB:
@@ -604,7 +705,8 @@ char *lineedit_read_line(const char *prompt) {
                                     buf[len] = '\0';
                                 }
 
-                                refresh_line(buf, len, pos, prompt_str);
+                                refresh_line(buf, len, pos, prompt_str, newline_count);
+                                // newline_count = count_newlines(buf);
                             }
 
                             last_was_tab = 0;
@@ -659,7 +761,8 @@ char *lineedit_read_line(const char *prompt) {
                                 }
 
                                 // Redraw prompt and line
-                                refresh_line(buf, len, pos, prompt_str);
+                                refresh_line(buf, len, pos, prompt_str, newline_count);
+                                // newline_count = count_newlines(buf);
                                 last_was_tab = 0;
                             } else {
                                 // First TAB - complete common prefix
@@ -686,7 +789,8 @@ char *lineedit_read_line(const char *prompt) {
                                             pos += prefix_len;
                                             len += prefix_len;
                                             buf[len] = '\0';
-                                            refresh_line(buf, len, pos, prompt_str);
+                                            refresh_line(buf, len, pos, prompt_str, newline_count);
+                                            // newline_count = count_newlines(buf);
                                         }
                                     }
                                 }
@@ -715,7 +819,7 @@ char *lineedit_read_line(const char *prompt) {
                     buf[len] = '\0';
 
                     if (pos < len) {
-                        refresh_line(buf, len, pos, prompt_str);
+                        refresh_line(buf, len, pos, prompt_str, newline_count);
                     } else {
                         ret = write(STDOUT_FILENO, &c, 1);
                         (void)ret;
