@@ -331,7 +331,7 @@ static void set_cursor(const char *buf, size_t pos, size_t prev_pos,
         (void)ret;
     }
 
-    int begin = 0;
+    size_t begin = 0;
     if (pos > 0) {
         // Move cursor to correct position on that line
         // Count number of cols to move to right
@@ -365,22 +365,22 @@ static void set_cursor(const char *buf, size_t pos, size_t prev_pos,
 
 // Refresh the line on screen (supports multi-line prompt and buffer)
 static void refresh_line(const char *buf, size_t len, size_t pos, const char *prompt,
-        int prev_buffer_lines) {
+        size_t prev_buffer_lines) {
     ssize_t ret;
 
     // Count how many lines up the cursor is
-    int count = 0;
+    size_t count = 0;
     for (ssize_t i = len - 1; i >= (ssize_t)pos; --i) {
         if (buf[i] == '\n') ++count;
     }
 
     // Count new lines in prompt and previous buffer
-    int prompt_lines = count_newlines(prompt) + prev_buffer_lines - count;
+    size_t prompt_lines = count_newlines(prompt) + prev_buffer_lines - count;
 
     // For multi-line prompt and buffer, move cursor up to where the prompt started
     if (prompt_lines > 0) {
         char up_seq[32];
-        snprintf(up_seq, sizeof(up_seq), "\x1b[%dA", prompt_lines);
+        snprintf(up_seq, sizeof(up_seq), "\x1b[%zuA", prompt_lines);
         ret = write(STDOUT_FILENO, up_seq, strlen(up_seq));
         (void)ret;
     }
