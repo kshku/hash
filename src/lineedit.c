@@ -411,6 +411,18 @@ void lineedit_cleanup(void) {
     disable_raw_mode();
 }
 
+bool inside_quote(const char *buf, size_t len) {
+    char single_quote = 0;
+    char double_quote = 0;
+    // Loop through buffer to check whether we are inside the quote
+    // If we are already inside one type of quote, then other type of quote is ignored.
+    for (size_t i = 0; i < len; ++i) {
+        if (buf[i] == '\'' && !double_quote) single_quote ^= 1;
+        else if (buf[i] == '"' && !single_quote) double_quote ^= 1;
+    }
+    return single_quote || double_quote;
+}
+
 // Read a line with editing capabilities
 char *lineedit_read_line(const char *prompt) {
     static char buf[MAX_LINE_LENGTH];
@@ -464,8 +476,8 @@ char *lineedit_read_line(const char *prompt) {
 
         switch (c) {
             case KEY_ENTER:
-                // Check for line continuation
-                if (buf[len - 1] == '\\') {
+                // Check for new line escape and quotes
+                if (buf[len - 1] == '\\' || inside_quote(buf, len)) {
                     last_was_tab = 0;
                     if (len < MAX_LINE_LENGTH - 1) {
                         buf[len] = '\n';
