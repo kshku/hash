@@ -1,14 +1,12 @@
 # syntax=docker/dockerfile:1
 
 # =============================================================================
-# Stage 1: Builder
+# Stage 1: Builder (Alpine/musl)
 # =============================================================================
-FROM debian:trixie-slim AS builder
+FROM alpine:edge AS builder
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache build-base
 
 # Set working directory
 WORKDIR /build
@@ -21,20 +19,17 @@ COPY Makefile .
 RUN make clean && make
 
 # =============================================================================
-# Stage 2: Runtime
+# Stage 2: Runtime (Alpine - minimal with utilities)
 # =============================================================================
-FROM debian:trixie-slim
+FROM alpine:edge
 
 # Add labels for container metadata
 LABEL org.opencontainers.image.title="hash-shell"
-LABEL org.opencontainers.image.description="POSIX-compliant command line interpreter"
+LABEL org.opencontainers.image.description="A modern command line interpreter for Linux, macOS, and BSD."
 LABEL org.opencontainers.image.source="https://github.com/juliojimenez/hash"
 
 # Copy binary from builder
 COPY --from=builder /build/hash-shell /usr/local/bin/hash-shell
-
-# Copy man page (optional documentation)
-COPY debian/hash-shell.1 /usr/local/share/man/man1/hash-shell.1
 
 # Set hash-shell as the default shell
 ENV SHELL=/usr/local/bin/hash-shell
