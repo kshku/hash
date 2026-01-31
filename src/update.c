@@ -322,7 +322,8 @@ void update_record_check(void) {
 static int run_curl(const char *url, char *output, size_t output_size) {
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-             "curl -sL -H 'Accept: application/vnd.github.v3+json' '%s' 2>/dev/null",
+             "curl -sL --connect-timeout 3 --max-time 5 "
+             "-H 'Accept: application/vnd.github.v3+json' '%s' 2>/dev/null",
              url);
 
     FILE *fp = popen(cmd, "r");
@@ -715,6 +716,12 @@ int shell_update(char **args) {
 }
 
 void update_startup_check(void) {
+    // Skip update check if stdin is not a tty (piped input, non-interactive use)
+    // Update notifications aren't useful in automated/scripted scenarios
+    if (!isatty(STDIN_FILENO)) {
+        return;
+    }
+
     // Check if updates are disabled via environment variable
     const char *disabled = getenv("HASH_DISABLE_UPDATE_CHECK");
     if (disabled && (disabled[0] == '1' || disabled[0] == 'y' || disabled[0] == 'Y')) {

@@ -34,6 +34,7 @@ Julio Jimenez, julio@julioj.com
 #include "trap.h"
 #include "color_config.h"
 #include "syntax.h"
+#include "ifs.h"
 
 // Shell process group ID
 static pid_t shell_pgid;
@@ -157,6 +158,7 @@ static void print_usage(const char *prog_name) {
     printf("  -i            Force interactive mode\n");
     printf("  -l, --login   Run as a login shell\n");
     printf("  -s            Read commands from standard input\n");
+    printf("  -u            Treat unset variables as an error\n");
     printf("  -v, --version Print version information\n");
     printf("  -h, --help    Show this help message\n");
     printf("\n");
@@ -178,6 +180,7 @@ int main(int argc, char *argv[]) {
     char **script_argv = NULL;        // Script arguments ($0, $1, $2, ...)
     bool force_interactive = false;   // -i flag
     bool read_stdin = false;          // -s flag
+    bool nounset_flag = false;        // -u flag
 
     // Determine if we're a login shell
     // A login shell is indicated by:
@@ -222,6 +225,10 @@ int main(int argc, char *argv[]) {
 
             } else if (strcmp(argv[i], "-s") == 0) {
                 read_stdin = true;
+                i++;
+
+            } else if (strcmp(argv[i], "-u") == 0) {
+                nounset_flag = true;
                 i++;
 
             } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -281,6 +288,18 @@ int main(int argc, char *argv[]) {
     // Import environment variables (so they can be modified and synced back)
     shellvar_sync_from_env();
 
+    // POSIX: The shell shall set IFS to <space><tab><newline> at shell invocation
+    // This overrides any IFS inherited from the environment
+    shellvar_set("IFS", DEFAULT_IFS);
+
+    // Set PPID (parent process ID) - POSIX special variable, readonly
+    {
+        char ppid_str[32];
+        snprintf(ppid_str, sizeof(ppid_str), "%d", getppid());
+        shellvar_set("PPID", ppid_str);
+        shellvar_set_readonly("PPID");
+    }
+
     // Initialize trap system
     trap_init();
 
@@ -295,6 +314,12 @@ int main(int argc, char *argv[]) {
 
     // Initialize config with defaults
     config_init();
+
+    // Apply command-line shell options that were parsed earlier
+    // (These must be applied after config_init which resets options)
+    if (nounset_flag) {
+        shell_option_set_nounset(true);
+    }
 
     // ========================================================================
     // Non-interactive mode: Execute command string (-c)
@@ -341,8 +366,9 @@ int main(int argc, char *argv[]) {
 
     // ========================================================================
     // Non-interactive mode: Read from stdin (-s or piped input)
+    // Note: If -i flag was used, skip this and go to interactive mode
     // ========================================================================
-    if (read_stdin || !isatty(STDIN_FILENO)) {
+    if ((read_stdin || !isatty(STDIN_FILENO)) && !force_interactive) {
         // Set up positional parameters if provided (for -s)
         if (script_argc > 0 && script_argv != NULL) {
             script_state.positional_params = malloc((size_t)script_argc * sizeof(char*));
@@ -413,6 +439,13 @@ int main(int argc, char *argv[]) {
     // Initialize prompt system
     prompt_init();
 
+    // Set up fancy default prompt only when stdin is a real tty
+    // This ensures POSIX compliance when stdin is redirected (e.g., heredoc)
+    // while giving nice defaults for normal interactive use
+    if (isatty(STDIN_FILENO)) {
+        prompt_set_fancy_default();
+    }
+
     // Initialize history (loads from ~/.hash_history)
     history_init();
 
@@ -431,7 +464,9 @@ int main(int argc, char *argv[]) {
     // Load color configuration from environment (after startup files)
     color_config_load_env();
 
-    if (shell_config.show_welcome) {
+    // Only show welcome message when stdin is a real tty
+    // This ensures POSIX compliance when stdin is redirected (e.g., heredoc with -i)
+    if (shell_config.show_welcome && isatty(STDIN_FILENO)) {
         color_print(COLOR_BOLD COLOR_CYAN, "%s", HASH_NAME);
         printf(" v%s", HASH_VERSION);
         if (is_login_shell_global) {

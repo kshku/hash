@@ -18,8 +18,18 @@ PromptConfig prompt_config;
 // Initialize prompt system
 void prompt_init(void) {
     prompt_config.use_custom_ps1 = false;
-    // Default PS1: <path> git:(branch) #>
-    safe_strcpy(prompt_config.ps1, "\\w\\g \\e#>\\e", MAX_PROMPT_LENGTH);
+    prompt_config.ps1[0] = '\0';
+}
+
+// Set up default fancy prompt (call only when stdin is a tty)
+void prompt_set_fancy_default(void) {
+    // Only set fancy default if PS1 is not already in environment
+    // and no custom PS1 has been configured
+    if (getenv("PS1") == NULL && !prompt_config.use_custom_ps1) {
+        prompt_config.use_custom_ps1 = true;
+        // Default PS1: <path> git:(branch) #>
+        safe_strcpy(prompt_config.ps1, "\\w\\g \\e#>\\e", MAX_PROMPT_LENGTH);
+    }
 }
 
 // Set custom PS1
@@ -297,13 +307,20 @@ char *prompt_generate(int last_exit_code) {
     // Get PS1 from environment or config
     const char *ps1;
     const char *ps1_env = getenv("PS1");
+    bool ps1_from_env = false;
 
     if (ps1_env) {
+        // PS1 explicitly set in environment - always use it
         ps1 = ps1_env;
-    } else if (prompt_config.use_custom_ps1) {
+        ps1_from_env = true;
+    } else if (prompt_config.use_custom_ps1 && isatty(STDIN_FILENO)) {
+        // Use custom PS1 only when stdin is a tty
         ps1 = prompt_config.ps1;
     } else {
-        ps1 = "\\w\\g \\e#>\\e";
+        // POSIX default: "$ " (or "# " for root)
+        // Used when stdin is not a tty or no custom PS1 is configured
+        ps1 = (getuid() == 0) ? "# " : "$ ";
+        ps1_from_env = true;  // Treat as simple prompt (no escape processing)
     }
 
     // Check if PS1 needs dynamic expansion (for Starship, etc.)
@@ -358,9 +375,15 @@ char *prompt_generate(int last_exit_code) {
     char temp_prompt[MAX_PROMPT_LENGTH - 64];
     process_ps1_escapes(temp_prompt, sizeof(temp_prompt), ps1, last_exit_code);
 
-    // Wrap entire prompt in base prompt color (bold by default) and add final reset + space
-    const char *base_color = color_config_get(color_config.prompt);
-    snprintf(prompt, sizeof(prompt), "%s%s%s ", base_color, temp_prompt, color_code(COLOR_RESET));
+    // POSIX compliance: if PS1 is from environment, output it without adding colors
+    // Only add color wrapping for the default hash prompt
+    if (ps1_from_env) {
+        safe_strcpy(prompt, temp_prompt, sizeof(prompt));
+    } else {
+        // Wrap entire prompt in base prompt color (bold by default) and add final reset + space
+        const char *base_color = color_config_get(color_config.prompt);
+        snprintf(prompt, sizeof(prompt), "%s%s%s ", base_color, temp_prompt, color_code(COLOR_RESET));
+    }
 
     return prompt;
 }
