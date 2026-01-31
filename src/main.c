@@ -32,6 +32,8 @@ Julio Jimenez, julio@julioj.com
 #include "update.h"
 #include "shellvar.h"
 #include "trap.h"
+#include "color_config.h"
+#include "syntax.h"
 
 // Shell process group ID
 static pid_t shell_pgid;
@@ -285,6 +287,12 @@ int main(int argc, char *argv[]) {
     // Initialize colors
     colors_init();
 
+    // Initialize color configuration with defaults
+    color_config_init();
+
+    // Initialize syntax highlighting
+    syntax_init();
+
     // Initialize config with defaults
     config_init();
 
@@ -419,6 +427,9 @@ int main(int argc, char *argv[]) {
 
     // Load startup files based on shell type
     config_load_startup_files(is_login_shell_global);
+
+    // Load color configuration from environment (after startup files)
+    color_config_load_env();
 
     if (shell_config.show_welcome) {
         color_print(COLOR_BOLD COLOR_CYAN, "%s", HASH_NAME);
