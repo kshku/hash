@@ -144,10 +144,13 @@ void jobs_update_status(pid_t pid, int status) {
 
     if (WIFEXITED(status)) {
         job->state = JOB_DONE;
+        job->exit_status = WEXITSTATUS(status);
     } else if (WIFSIGNALED(status)) {
         job->state = JOB_TERMINATED;
+        job->exit_status = 128 + WTERMSIG(status);
     } else if (WIFSTOPPED(status)) {
         job->state = JOB_STOPPED;
+        job->exit_status = 128 + WSTOPSIG(status);
     }
 }
 
@@ -166,9 +169,9 @@ static const char *state_string(JobState state) {
 void jobs_check_completed(void) {
     for (int i = 0; i < MAX_JOBS; i++) {
         if (jobs[i].pid != 0 && !jobs[i].notified) {
-            // Check if process has terminated
+            // Check if process has terminated or stopped
             int status;
-            pid_t result = waitpid(jobs[i].pid, &status, WNOHANG);
+            pid_t result = waitpid(jobs[i].pid, &status, WNOHANG | WUNTRACED);
 
             if (result > 0) {
                 // Process has terminated
@@ -205,9 +208,9 @@ void jobs_list(JobsFormat format) {
 
     for (int i = 0; i < MAX_JOBS; i++) {
         if (jobs[i].pid != 0) {
-            // Check current status
+            // Check current status (WUNTRACED to detect stopped processes)
             int status;
-            pid_t result = waitpid(jobs[i].pid, &status, WNOHANG);
+            pid_t result = waitpid(jobs[i].pid, &status, WNOHANG | WUNTRACED);
 
             if (result > 0) {
                 jobs_update_status(jobs[i].pid, status);

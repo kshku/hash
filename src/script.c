@@ -1141,6 +1141,37 @@ static int execute_simple_line(const char *line) {
             // p points to matching ')'
             const char *end_paren = p;
 
+            // Check if there are chain operators after the subshell
+            // If so, let chain_parse handle the entire line
+            const char *after = end_paren + 1;
+            while (*after && isspace(*after)) after++;
+            // Skip any redirections (N<, N>, etc.)
+            while (*after) {
+                // Skip fd number if present
+                while (isdigit(*after)) after++;
+                if (*after == '<' || *after == '>') {
+                    // Skip the redirection operator
+                    after++;
+                    if (*after == '>' || *after == '&') after++;
+                    // Skip whitespace
+                    while (*after && isspace(*after)) after++;
+                    // Skip the filename (until whitespace or another operator)
+                    while (*after && !isspace(*after) && *after != '&' &&
+                           *after != ';' && *after != '|' && *after != '<' && *after != '>') {
+                        after++;
+                    }
+                    // Skip trailing whitespace
+                    while (*after && isspace(*after)) after++;
+                } else {
+                    break;  // Not a redirection
+                }
+            }
+            // Now check if there's a chain operator or pipe
+            if (*after == '&' || *after == ';' || *after == '|') {
+                // Has chain operator or pipe after subshell - let chain_parse handle it
+                goto use_chain_parse;
+            }
+
             // Extract the subshell content
             const char *start = line + 1;
             size_t subshell_len = end_paren - start;
@@ -1275,16 +1306,19 @@ static int execute_simple_line(const char *line) {
                 trap_reset_for_subshell();
                 // POSIX: break/continue only affect loops in this subshell, not parent's loops
                 script_reset_for_subshell();
+                // Clear pending heredoc to prevent recursive expansion
+                script_clear_pending_heredoc();
                 // Note: don't close stdin for subshells as they run synchronously
                 int exit_code = script_execute_string(subshell_cmd);
                 free(subshell_cmd);
                 // Execute EXIT trap before exiting subshell (only if set in this subshell)
-                trap_execute_exit();
+                // POSIX: The exit status of the trap action becomes the exit status
+                int trap_exit = trap_execute_exit();
                 // Flush output before exit to ensure all output is visible
                 fflush(stdout);
                 fflush(stderr);
-                // script_execute_string returns the exit code directly
-                _exit(exit_code);
+                // Use trap exit status if a trap was set
+                _exit((trap_exit >= 0) ? trap_exit : exit_code);
             }
 
             // Parent process - wait for child
@@ -1346,6 +1380,8 @@ static int execute_simple_line(const char *line) {
                 if (pid == 0) {
                     // Child process - close stdin to avoid interference with parent
                     close(STDIN_FILENO);
+                    // Clear pending heredoc to prevent recursive expansion
+                    script_clear_pending_heredoc();
                     script_execute_string(group_cmd);
                     free(group_cmd);
                     fflush(stdout);
@@ -2525,6 +2561,7 @@ static char *find_unquoted_close_paren(char *str) {
 // Handles POSIX shell pattern matching with *, ?, [...]
 static bool case_pattern_matches(const char *pattern, const char *word) {
     if (!pattern || !word) return false;
+    // DEBUG
     // fnmatch returns 0 on match
     return fnmatch(pattern, word, 0) == 0;
 }
@@ -2591,7 +2628,7 @@ static int execute_case_body(const char *body, const char *word) {
         // If we're in a matched clause, this should be a command, not a pattern
         // Use script_process_line to handle nested control structures (case, if, for, etc.)
         if (in_matched_clause) {
-            // Execute this command using script_process_line to handle nested structures
+            // Execute the line via script_process_line which handles nested structures
             int cmd_result = script_process_line(line);
             result_exit_code = last_command_exit_code;
             if (cmd_result == 0) {
@@ -2599,6 +2636,30 @@ static int execute_case_body(const char *body, const char *word) {
                 free(body_copy);
                 return result_exit_code;
             }
+
+            // After execution, check if the line ended with ;; to terminate the clause
+            // But ONLY if we're not inside a nested collecting context
+            const ScriptContext *current_ctx = get_current_context();
+            bool nested_collecting = (current_ctx && current_ctx->collecting_body);
+
+            if (!nested_collecting) {
+                // Check if line ends with ;; (not inside quotes)
+                bool in_sq = false, in_dq = false;
+                bool found_double_semi = false;
+                for (const char *s = trimmed; *s; s++) {
+                    if (*s == '\\' && s[1]) { s++; continue; }
+                    if (*s == '\'' && !in_dq) in_sq = !in_sq;
+                    else if (*s == '"' && !in_sq) in_dq = !in_dq;
+                    else if (!in_sq && !in_dq && s[0] == ';' && s[1] == ';') {
+                        found_double_semi = true;
+                        break;
+                    }
+                }
+                if (found_double_semi) {
+                    in_matched_clause = false;
+                }
+            }
+
             line = next_line;
             continue;
         }
@@ -3008,19 +3069,36 @@ static char *expand_case_word(const char *word) {
         result = varexp;
     }
 
-    // Strip \x03 IFS markers from expansion (but NOT \x01 which protect literals)
-    // Case words don't undergo IFS splitting, but \x03 markers still need removal
-    // Note: \x01 markers are handled by remove_shell_quotes below
+    // Process \x03 IFS markers from expansion
+    // Case words don't undergo IFS splitting, but we need to:
+    // 1. Protect backslashes and quotes that came from expansion with \x01 markers
+    //    so remove_shell_quotes won't re-interpret them
+    // 2. Remove the \x03 markers themselves
     {
-        const char *read = result;
-        char *write = result;
-        while (*read) {
-            if (*read != '\x03') {
-                *write++ = *read;
+        size_t len = strlen(result);
+        // Worst case: every char in expansion needs a marker
+        char *new_result = malloc(len * 2 + 1);
+        if (new_result) {
+            const char *read = result;
+            char *write = new_result;
+            bool in_expansion = false;
+            while (*read) {
+                if (*read == '\x03') {
+                    in_expansion = !in_expansion;
+                    read++;
+                    continue;
+                }
+                // Within expansion regions, protect backslashes and quotes
+                // so remove_shell_quotes treats them as literal
+                if (in_expansion && (*read == '\\' || *read == '\'' || *read == '"')) {
+                    *write++ = '\x01';
+                }
+                *write++ = *read++;
             }
-            read++;
+            *write = '\0';
+            free(result);
+            result = new_result;
         }
-        *write = '\0';
     }
 
     // Remove shell quotes (quote removal phase of word expansion)
@@ -3821,6 +3899,14 @@ const char *script_get_pending_heredoc(void) {
 // Get whether the pending heredoc delimiter was quoted (no expansion)
 int script_get_pending_heredoc_quoted(void) {
     return pending_heredoc_quoted;
+}
+
+// Clear pending heredoc (for forked children to prevent recursive expansion)
+void script_clear_pending_heredoc(void) {
+    // Don't free - parent still owns the memory
+    // Just clear our reference to it
+    pending_heredoc = NULL;
+    pending_heredoc_quoted = 0;
 }
 
 // Track whether we're in a condition context (if/while/until condition)

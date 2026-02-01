@@ -314,42 +314,38 @@ int shell_source(char **args) {
     char resolved_path[PATH_MAX];
 
     // POSIX: If filename doesn't contain '/', search PATH for it
+    // Note: POSIX says to use PATH only, NOT to check CWD first
     if (strchr(filepath, '/') == NULL) {
-        // First check whether file is in CWD
-        snprintf(resolved_path, sizeof(resolved_path), "./%s", filepath);
-        if (access(resolved_path, R_OK) == 0) {
-            filepath = resolved_path;
-        } else {
-            // Use shellvar_get to see shell variables (which may not be in env)
-            const char *path_env = shellvar_get("PATH");
-            if (path_env) {
-                char *path_copy = strdup(path_env);
-                if (path_copy) {
-                    char *saveptr;
-                    char *dir = strtok_r(path_copy, ":", &saveptr);
-                    bool found = false;
+        // Use shellvar_get to see shell variables (which may not be in env)
+        const char *path_env = shellvar_get("PATH");
+        bool found = false;
 
-                    while (dir) {
-                        snprintf(resolved_path, sizeof(resolved_path), "%s/%s", dir, filepath);
-                        // Check if file exists and is readable
-                        if (access(resolved_path, R_OK) == 0) {
-                            filepath = resolved_path;
-                            found = true;
-                            break;
-                        }
-                        dir = strtok_r(NULL, ":", &saveptr);
-                    }
-                    free(path_copy);
+        if (path_env && *path_env) {
+            char *path_copy = strdup(path_env);
+            if (path_copy) {
+                char *saveptr;
+                char *dir = strtok_r(path_copy, ":", &saveptr);
 
-                    if (!found) {
-                        // File not found in PATH
-                        fprintf(stderr, "%s: %s: not found\n", args[0], args[1]);
-                        last_command_exit_code = 1;
-                        // Special builtin: non-interactive shell should exit on error
-                        return is_interactive ? 1 : 0;
+                while (dir) {
+                    snprintf(resolved_path, sizeof(resolved_path), "%s/%s", dir, filepath);
+                    // Check if file exists and is readable
+                    if (access(resolved_path, R_OK) == 0) {
+                        filepath = resolved_path;
+                        found = true;
+                        break;
                     }
+                    dir = strtok_r(NULL, ":", &saveptr);
                 }
+                free(path_copy);
             }
+        }
+
+        if (!found) {
+            // File not found in PATH
+            fprintf(stderr, "%s: %s: not found\n", args[0], args[1]);
+            last_command_exit_code = 1;
+            // Special builtin: non-interactive shell should exit on error
+            return is_interactive ? 1 : 0;
         }
     } else {
         // Filepath contains '/' - check if it exists
@@ -534,8 +530,12 @@ int shell_set(char **args) {
                 shell_option_set_nonlexicalctrl(true);
             } else if (strcmp(opt, "nolog") == 0) {
                 shell_option_set_nolog(true);
+            } else {
+                // POSIX: unknown option is an error
+                color_error("%s: set: %s: invalid option name", HASH_NAME, opt);
+                last_command_exit_code = 1;
+                return 1;
             }
-            // Silently ignore unknown -o options for compatibility
             last_command_exit_code = 0;
             continue;
         } else if (strcmp(arg, "+o") == 0 && args[i + 1] != NULL) {
@@ -551,8 +551,12 @@ int shell_set(char **args) {
                 shell_option_set_nonlexicalctrl(false);
             } else if (strcmp(opt, "nolog") == 0) {
                 shell_option_set_nolog(false);
+            } else {
+                // POSIX: unknown option is an error
+                color_error("%s: set: %s: invalid option name", HASH_NAME, opt);
+                last_command_exit_code = 1;
+                return 1;
             }
-            // Silently ignore unknown +o options for compatibility
             last_command_exit_code = 0;
             continue;
         }
@@ -1491,15 +1495,24 @@ int shell_times(char **args) {
     long child_sys_sec = times_buf.tms_cstime / ticks_per_sec;
     long child_sys_ms = (times_buf.tms_cstime % ticks_per_sec) * 1000 / ticks_per_sec;
 
-    // Print in format: Xm0.XXXs Xm0.XXXs
-    // Check for I/O errors (e.g., broken pipe)
-    if (printf("%ldm%ld.%03lds %ldm%ld.%03lds\n",
+    // Format output into buffer and use write(2) directly to detect EPIPE immediately
+    // (printf/fflush may not detect broken pipe due to buffering)
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf), "%ldm%ld.%03lds %ldm%ld.%03lds\n",
            shell_user_sec / 60, shell_user_sec % 60, shell_user_ms,
-           shell_sys_sec / 60, shell_sys_sec % 60, shell_sys_ms) < 0 ||
-        printf("%ldm%ld.%03lds %ldm%ld.%03lds\n",
+           shell_sys_sec / 60, shell_sys_sec % 60, shell_sys_ms);
+
+    if (len < 0 || write(STDOUT_FILENO, buf, (size_t)len) < 0) {
+        fprintf(stderr, "%s: times: I/O error\n", HASH_NAME);
+        last_command_exit_code = 2;
+        return 1;
+    }
+
+    len = snprintf(buf, sizeof(buf), "%ldm%ld.%03lds %ldm%ld.%03lds\n",
            child_user_sec / 60, child_user_sec % 60, child_user_ms,
-           child_sys_sec / 60, child_sys_sec % 60, child_sys_ms) < 0 ||
-        fflush(stdout) != 0) {
+           child_sys_sec / 60, child_sys_sec % 60, child_sys_ms);
+
+    if (len < 0 || write(STDOUT_FILENO, buf, (size_t)len) < 0) {
         fprintf(stderr, "%s: times: I/O error\n", HASH_NAME);
         last_command_exit_code = 2;
         return 1;
@@ -1794,11 +1807,14 @@ int shell_wait(char **args) {
 
         if (pid > 0) {
             int status;
-            if (waitpid(pid, &status, 0) > 0) {
+            pid_t result = waitpid(pid, &status, 0);
+            if (result > 0) {
                 if (WIFEXITED(status)) {
                     last_command_exit_code = WEXITSTATUS(status);
-                } else {
+                } else if (WIFSIGNALED(status)) {
                     last_command_exit_code = 128 + WTERMSIG(status);
+                } else {
+                    last_command_exit_code = 1;
                 }
                 jobs_update_status(pid, status);
                 // Remove the completed job from the table
@@ -1806,11 +1822,20 @@ int shell_wait(char **args) {
                     jobs_remove(job_id_to_remove);
                 }
             } else {
-                // Process already exited or doesn't exist
-                last_command_exit_code = 127;
-                // Still remove from job table if it exists
-                if (job_id_to_remove > 0) {
+                // Process already exited (reaped by SIGCHLD handler) or doesn't exist
+                // Check if we have a stored exit status from the job table
+                const Job *job = jobs_get_by_pid(pid);
+                if (job && (job->state == JOB_DONE || job->state == JOB_TERMINATED)) {
+                    // Use the stored exit status from when SIGCHLD reaped it
+                    last_command_exit_code = job->exit_status;
+                    jobs_remove(job->job_id);
+                } else if (job_id_to_remove > 0) {
+                    // Job exists but no stored status - shouldn't happen
+                    last_command_exit_code = 127;
                     jobs_remove(job_id_to_remove);
+                } else {
+                    // Not a known job - just report 127
+                    last_command_exit_code = 127;
                 }
             }
         }

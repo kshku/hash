@@ -71,6 +71,9 @@ static char *execute_and_capture(const char *cmd) {
         trap_reset_for_subshell();
         // POSIX: break/continue only affect loops in this subshell
         script_reset_for_subshell();
+        // Clear pending heredoc to prevent recursive expansion
+        // (parent's heredoc content shouldn't affect child)
+        script_clear_pending_heredoc();
 
         // Tell execute() to exec directly instead of fork+exec.
         // This ensures $PPID returns the correct parent PID for commands
@@ -80,9 +83,10 @@ static char *execute_and_capture(const char *cmd) {
         // Use hash's own script execution to preserve function definitions
         int result = script_execute_string(cmd);
         fflush(stdout);  // Ensure output is flushed before exit
-        trap_execute_exit();  // Run EXIT trap before exiting subshell
+        // POSIX: The exit status of the trap action becomes the exit status
+        int trap_exit = trap_execute_exit();  // Run EXIT trap before exiting subshell
         fflush(stdout);  // Flush any trap output
-        _exit(result);
+        _exit((trap_exit >= 0) ? trap_exit : result);
     }
 
     // Parent process

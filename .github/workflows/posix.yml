@@ -69,19 +69,7 @@ jobs:
 
           # Tests to skip (platform-specific issues, known failures)
           # Format: space-separated list of test names (without .test extension)
-          SKIP_TESTS="
-            builtin.kill.jobs
-            builtin.readonly.assign.interactive
-            builtin.set.quoted
-            builtin.times.ioerror
-            builtin.trap.subshell.false.exit
-            builtin.trap.subshell.loud
-            builtin.trap.subshell.loud2
-            semantics.arith.var.space
-            semantics.backtick.fds
-            semantics.escaping.backslash.modernish
-            semantics.pattern.rightbracket
-          "
+          SKIP_TESTS=""
 
           # Function to check if test should be skipped
           should_skip() {
@@ -144,8 +132,11 @@ jobs:
               fi
 
               # Check stderr if expected file exists
+              # Normalize shell name (hash: -> smoosh:) for comparison since
+              # error messages include the shell name
               if [ -f "$ERR_FILE" ] && [ "$TEST_PASSED" = true ]; then
-                if ! diff -q "results/${TEST_NAME}.actual_err" "$ERR_FILE" > /dev/null 2>&1; then
+                sed 's/^hash:/smoosh:/g' "results/${TEST_NAME}.actual_err" > "results/${TEST_NAME}.normalized_err"
+                if ! diff -q "results/${TEST_NAME}.normalized_err" "$ERR_FILE" > /dev/null 2>&1; then
                   TEST_PASSED=false
                 fi
               fi
@@ -227,12 +218,25 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/mgree/smoosh.git smoosh-tests
 
+          # Build test utilities (same as smoosh-tests job)
+          cd smoosh-tests/tests/util
+          for src in *.c; do
+            bin="${src%.c}"
+            gcc -o "$bin" "$src" 2>/dev/null || echo "Note: Could not build $bin"
+          done
+
       - name: Run Comparison Tests
         run: |
           cd smoosh-tests/tests
 
+          # Export TEST_SHELL and TEST_UTIL for tests (same as smoosh-tests job)
+          export TEST_UTIL="$(pwd)/util"
+
           echo "=== Shell Comparison ==="
           echo ""
+
+          # Create results directory for output files
+          mkdir -p results
 
           # Function to run tests for a shell
           run_shell_tests() {
@@ -243,6 +247,10 @@ jobs:
             local FAILED=0
             local TIMEOUT_COUNT=0
             local TOTAL=0
+            local BASE_DIR="$(pwd)"
+
+            # Set TEST_SHELL for this specific shell
+            export TEST_SHELL="$SHELL_PATH"
 
             for test_file in shell/*.test; do
               if [ -f "$test_file" ]; then
@@ -250,11 +258,14 @@ jobs:
                 TEST_NAME=$(basename "$test_file" .test)
                 EC_FILE="shell/${TEST_NAME}.ec"
 
-                # Run with timeout, capture exit code
+                # Run test with timeout in a clean temp directory (like smoosh test runner)
+                # Explicitly pass environment variables to ensure they reach the test
+                TEST_TMP=$(mktemp -d)
                 set +e
-                timeout 2s "$SHELL_PATH" < "$test_file" > /dev/null 2>&1
+                (cd "$TEST_TMP" && TEST_SHELL="$SHELL_PATH" TEST_UTIL="$TEST_UTIL" timeout 5s "$SHELL_PATH" "${BASE_DIR}/$test_file" > "${BASE_DIR}/results/${SHELL_NAME}_${TEST_NAME}.out" 2> "${BASE_DIR}/results/${SHELL_NAME}_${TEST_NAME}.err")
                 ACTUAL_EC=$?
                 set -e
+                rm -rf "$TEST_TMP"
 
                 # Check for timeout
                 if [ $ACTUAL_EC -eq 124 ]; then
@@ -262,7 +273,7 @@ jobs:
                   continue
                 fi
 
-                # Check exit code
+                # Check exit code (only if .ec file exists, matching smoosh-tests behavior)
                 if [ -f "$EC_FILE" ]; then
                   EXPECTED_EC=$(cat "$EC_FILE" | tr -d '[:space:]')
                   if [ "$ACTUAL_EC" = "$EXPECTED_EC" ]; then
@@ -271,12 +282,8 @@ jobs:
                     FAILED=$((FAILED + 1))
                   fi
                 else
-                  # No expected exit code, assume 0
-                  if [ $ACTUAL_EC -eq 0 ]; then
-                    PASSED=$((PASSED + 1))
-                  else
-                    FAILED=$((FAILED + 1))
-                  fi
+                  # No expected exit code file - pass (smoosh-tests doesn't check exit code without .ec file)
+                  PASSED=$((PASSED + 1))
                 fi
               fi
             done
