@@ -96,7 +96,7 @@ hash-shell
 
 ```bash
 # Add repository
-echo "deb [trusted=yes] https://juliojimenez.github.io/hash/ stable main" | sudo tee /etc/apt/sources.list.d/hash-shell.list
+echo "deb [trusted=yes] https://hash-shell.org/apt/ stable main" | sudo tee /etc/apt/sources.list.d/hash-shell.list
 
 # Install
 sudo apt update
@@ -104,6 +104,12 @@ sudo apt install hash-shell
 ```
 
 Upgrade with `sudo apt upgrade hash-shell`. See [APT Installation Guide](./docs/APT_INSTALL.md) for more options.
+
+> **URL Change Notice:** The APT repository has moved from `juliojimenez.github.io/hash/` to `hash-shell.org/apt/`. If you previously configured the old URL, update your sources list:
+> ```bash
+> sudo sed -i 's|juliojimenez.github.io/hash/|hash-shell.org/apt/|' /etc/apt/sources.list.d/hash-shell.list
+> sudo apt update
+> ```
 
 ### Docker
 
@@ -182,39 +188,9 @@ chsh -s /usr/local/bin/hash-shell
 | `-v`, `--version` | Print version information |
 | `-h`, `--help` | Show help message |
 
-## See Also
+# Full Documentation
 
-- [Shell Scripting](./docs/SCRIPTING.md)
-  - [Scripting Quick Reference](./docs/SCRIPTING_QUICKREF.md)
-  - [Control Structures](./docs/CONTROL_STRUCTURES.md)
-  - [Test Command](./docs/TEST_COMMAND.md)
-- [.hashrc](./docs/HASHRC.md)
-  - [.hashrc Quick Start](./docs/QUICK_START_HASHRC.md)
-- [Variable Expansion](./docs/VARIABLES.md)
-  - [Variables Quick Reference](./docs/VARIABLES_QUICKREF.md)
-- [Command Substitution](./docs/COMMAND_SUBSTITUTION.md)
-- [Line Editing](./docs/LINE_EDITING.md)
-- [Prompt Customization](./docs/PROMPT.md)
-  - [PS1 Reference](./docs/PS1.md)
-- [Pipes](./docs/PIPES.md)
-- [Command Chaining](./docs/COMMAND_CHAINING.md)
-- [Background Processes](./docs/BACKGROUND.md)
-- [I/O Redirection](./docs/REDIRECTION.md)
-- [Tilde Expansion](./docs/EXPANSION.md)
-- [Command History](./docs/HISTORY.md)
-  - [HISTCONTROL](./docs/HISTCONTROL.md)
-- [Tab Completion](./docs/TAB_COMPLETION.md)
-  - [Tab Completion Quick Reference](./docs/COMPLETION_QUICKREF.md)
-- [Login Shell](./docs/LOGIN_SHELL.md)
-- [Update Notifications](./docs/UPDATE.md)
-- [Safe String Utilities](./docs/SAFE_STRING.md)
-- [APT Installation](./docs/APT_INSTALL.md)
-- [FreeBSD Port](./freebsd/README.md)
-- [Testing](./docs/TESTING.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security Policy](SECURITY.md)
-- [Code of Conduct](CODE_OF_CONDUCT.md)
-- [License](LICENSE)
+https://hash-shell.org
 
 ## Newsletter
 
