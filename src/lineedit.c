@@ -321,7 +321,7 @@ static void write_with_crlf(const char *str) {
     }
 }
 
-// Set the cursor to given position (assumes cursor is at last line)
+// Set the cursor to given position.
 static void set_cursor(const char *buf, size_t pos, size_t prev_pos,
         const char *prompt) {
     size_t ret;
@@ -430,6 +430,8 @@ static void refresh_line(const char *buf, size_t len, size_t pos, const char *pr
         write_with_crlf(buf);
     }
 
+    size_t previous_pos = len;
+
     // Show autosuggestion if enabled and cursor is at end of buffer
     if (colors_enabled && color_config.autosuggestion_enabled && pos == len && len > 0) {
         const char *suggestion = autosuggest_get(buf, len);
@@ -437,17 +439,26 @@ static void refresh_line(const char *buf, size_t len, size_t pos, const char *pr
             // Write suggestion in dim color
             const char *suggest_color = color_config_get(color_config.suggestion);
             ret = write(STDOUT_FILENO, suggest_color, strlen(suggest_color));
-            (void)ret;
+            previous_pos += ret;
             ret = write(STDOUT_FILENO, suggestion, strlen(suggestion));
-            (void)ret;
+            previous_pos += ret;
             // Reset color
             const char *reset = color_code(COLOR_RESET);
             ret = write(STDOUT_FILENO, reset, strlen(reset));
-            (void)ret;
+            previous_pos += ret;
+
+            // Move the cursor up if there was a new line
+            for (size_t i = 0; suggestion[i]; ++i) {
+                if (suggestion[i] == '\n') {
+                    ret = write(STDOUT_FILENO, "\x1b[A", 3);
+                    (void)ret;
+                }
+            }
         }
     }
 
-    set_cursor(buf, pos, len, prompt);
+
+    set_cursor(buf, pos, previous_pos, prompt);
 }
 
 // Initialize line editor
@@ -623,14 +634,14 @@ char *lineedit_read_line(const char *prompt) {
                     break;
                 }
 
-                disable_raw_mode();
+                // Refresh line and move the cursor to end of line
+                // Hack to disable auto suggestion, move cursor one position back
+                set_cursor(buf, pos - 1, pos, prompt_str);
+                pos--;
+                refresh_line(buf, len, pos, prompt_str, newline_count);
+                set_cursor(buf, len, pos, prompt_str);
 
-                // Ensure we're at the end of the line visually
-                while (pos < len) {
-                    ret = write(STDOUT_FILENO, "\x1b[C", 3);
-                    (void)ret;
-                    pos++;
-                }
+                disable_raw_mode();
 
                 // Write newline and flush
                 ret = write(STDOUT_FILENO, "\r\n", 2);
@@ -723,9 +734,14 @@ char *lineedit_read_line(const char *prompt) {
                             len += sug_len;
                             pos = len;
                             buf[len] = '\0';
+                            refresh_line(buf, len, pos, prompt_str, newline_count);
+                            for (size_t i = 0; i < sug_len; ++i) {
+                                if (suggestion[i] == '\n') {
+                                    newline_count++;
+                                }
+                            }
                             // Invalidate cache since buffer changed
                             autosuggest_invalidate();
-                            refresh_line(buf, len, pos, prompt_str, newline_count);
                         }
                     }
                 }
