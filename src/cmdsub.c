@@ -39,57 +39,37 @@ void cmdsub_reset_exit_code(void) {
     last_cmdsub_exit_code = 0;
 }
 
-// Execute a command and capture its output
-static char *execute_and_capture(const char *cmd) {
-    if (!cmd || *cmd == '\0') return strdup("");
+static void child_process(const char *cmd, int pipefd[2]) {
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    close(pipefd[1]);
 
-    int pipefd[2];
-    if (pipe(pipefd) == -1) {
-        return NULL;
-    }
+    // Disable interactive mode in subshell to prevent job control issues
+    is_interactive = false;
 
-    // Flush stdout before forking to avoid duplicating buffered output
-    fflush(stdout);
+    // Reset traps for subshell - inherited traps should not execute
+    trap_reset_for_subshell();
+    // POSIX: break/continue only affect loops in this subshell
+    script_reset_for_subshell();
+    // Clear pending heredoc to prevent recursive expansion
+    // (parent's heredoc content shouldn't affect child)
+    script_clear_pending_heredoc();
 
-    pid_t pid = fork();
-    if (pid == -1) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return NULL;
-    }
+    // Tell execute() to exec directly instead of fork+exec.
+    // This ensures $PPID returns the correct parent PID for commands
+    // run inside command substitution.
+    exec_directly_in_child = true;
 
-    if (pid == 0) {
-        // Child process
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[1]);
+    // Use hash's own script execution to preserve function definitions
+    int result = script_execute_string(cmd);
+    fflush(stdout);  // Ensure output is flushed before exit
+    // POSIX: The exit status of the trap action becomes the exit status
+    int trap_exit = trap_execute_exit();  // Run EXIT trap before exiting subshell
+    fflush(stdout);  // Flush any trap output
+    _exit((trap_exit >= 0) ? trap_exit : result);
+}
 
-        // Disable interactive mode in subshell to prevent job control issues
-        is_interactive = false;
-
-        // Reset traps for subshell - inherited traps should not execute
-        trap_reset_for_subshell();
-        // POSIX: break/continue only affect loops in this subshell
-        script_reset_for_subshell();
-        // Clear pending heredoc to prevent recursive expansion
-        // (parent's heredoc content shouldn't affect child)
-        script_clear_pending_heredoc();
-
-        // Tell execute() to exec directly instead of fork+exec.
-        // This ensures $PPID returns the correct parent PID for commands
-        // run inside command substitution.
-        exec_directly_in_child = true;
-
-        // Use hash's own script execution to preserve function definitions
-        int result = script_execute_string(cmd);
-        fflush(stdout);  // Ensure output is flushed before exit
-        // POSIX: The exit status of the trap action becomes the exit status
-        int trap_exit = trap_execute_exit();  // Run EXIT trap before exiting subshell
-        fflush(stdout);  // Flush any trap output
-        _exit((trap_exit >= 0) ? trap_exit : result);
-    }
-
-    // Parent process
+static char *get_child_output(pid_t pid, int pipefd[2]) {
     close(pipefd[1]);
 
     char *output = malloc(MAX_CMD_OUTPUT);
@@ -128,6 +108,33 @@ static char *execute_and_capture(const char *cmd) {
     }
 
     return output;
+}
+
+// Execute a command and capture its output
+static char *execute_and_capture(const char *cmd) {
+    if (!cmd || *cmd == '\0') return strdup("");
+
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        return NULL;
+    }
+
+    // Flush stdout before forking to avoid duplicating buffered output
+    fflush(stdout);
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return NULL;
+    }
+
+    if (pid == 0) {
+        // child_process calls _exit()
+        child_process(cmd, pipefd);
+    }
+
+    return get_child_output(pid, pipefd);
 }
 
 // Find matching closing parenthesis, handling nesting
@@ -246,6 +253,87 @@ static ssize_t process_substitution(const char *cmd_start, size_t cmd_len,
     return (ssize_t)out_pos;
 }
 
+// Returns true if handled
+static bool handle_soh_marker(const char **read_char, char *result, size_t *write_index) {
+    const char *p = *read_char;
+    size_t out_pos = *write_index;
+
+    // Handle SOH marker with protected backslash (from single quotes: \$ or \`)
+    // Pass through to varexpand which will output \$ or \` literally
+    if (*p == '\x01' && *(p + 1) == '\\' && (*(p + 2) == '$' || *(p + 2) == '`')) {
+        if (out_pos < MAX_CMDSUB_LENGTH - 3) {
+            result[out_pos++] = *p++;  // marker
+            result[out_pos++] = *p++;  // backslash
+            result[out_pos++] = *p++;  // $ or `
+        } else {
+            p += 3;
+        }
+        goto handled;
+    }
+    // Handle SOH marker (single-quoted dollar sign from parser)
+    // Pass through to varexpand which will output literal $
+    if (*p == '\x01' && *(p + 1) == '$') {
+        if (out_pos < MAX_CMDSUB_LENGTH - 2) {
+            result[out_pos++] = *p++;  // marker
+            result[out_pos++] = *p++;  // $
+        } else {
+            p += 2;
+        }
+        goto handled;
+    }
+
+    return false;
+
+handled:
+    *read_char = p;
+    *write_index = out_pos;
+    return true;
+}
+
+// Returns true if handled
+static bool handle_arith_expr(const char **read_char, char *result, size_t *write_index) {
+    const char *p = *read_char;
+    size_t out_pos = *write_index;
+
+    if (*p == '$' && *(p + 1) == '(' && *(p + 2) == '(') {
+        // Copy $(( literally - arithmetic expansion handles this
+        result[out_pos++] = *p++;
+        if (out_pos < MAX_CMDSUB_LENGTH - 1) {
+            result[out_pos++] = *p++;
+        }
+        if (out_pos < MAX_CMDSUB_LENGTH - 1) {
+            result[out_pos++] = *p++;
+        }
+        // Copy until matching ))
+        int depth = 1;
+        while (*p && depth > 0 && out_pos < MAX_CMDSUB_LENGTH - 1) {
+            if (*p == '(' && *(p + 1) == '(') {
+                depth++;
+                result[out_pos++] = *p++;
+                if (out_pos < MAX_CMDSUB_LENGTH - 1) {
+                    result[out_pos++] = *p++;
+                }
+            } else if (*p == ')' && *(p + 1) == ')') {
+                depth--;
+                result[out_pos++] = *p++;
+                if (out_pos < MAX_CMDSUB_LENGTH - 1) {
+                    result[out_pos++] = *p++;
+                }
+            } else {
+                result[out_pos++] = *p++;
+            }
+        }
+        goto handled;
+    }
+
+    return false;
+
+handled:
+    *read_char = p;
+    *write_index = out_pos;
+    return true;
+}
+
 // Expand command substitutions in a string
 char *cmdsub_expand(const char *str) {
     if (!str || !has_cmdsub(str)) return NULL;
@@ -270,29 +358,11 @@ char *cmdsub_expand(const char *str) {
             result[out_pos++] = *p++;
             continue;
         }
-        // Handle SOH marker with protected backslash (from single quotes: \$ or \`)
-        // Pass through to varexpand which will output \$ or \` literally
-        if (*p == '\x01' && *(p + 1) == '\\' && (*(p + 2) == '$' || *(p + 2) == '`')) {
-            if (out_pos < MAX_CMDSUB_LENGTH - 3) {
-                result[out_pos++] = *p++;  // marker
-                result[out_pos++] = *p++;  // backslash
-                result[out_pos++] = *p++;  // $ or `
-            } else {
-                p += 3;
-            }
+
+        if (handle_soh_marker(&p, result, &out_pos)) {
             continue;
         }
-        // Handle SOH marker (single-quoted dollar sign from parser)
-        // Pass through to varexpand which will output literal $
-        if (*p == '\x01' && *(p + 1) == '$') {
-            if (out_pos < MAX_CMDSUB_LENGTH - 2) {
-                result[out_pos++] = *p++;  // marker
-                result[out_pos++] = *p++;  // $
-            } else {
-                p += 2;
-            }
-            continue;
-        }
+
         // Handle escape sequences
         if (*p == '\\' && *(p + 1)) {
             if (*(p + 1) == '$' || *(p + 1) == '`') {
@@ -314,36 +384,10 @@ char *cmdsub_expand(const char *str) {
         }
 
         // Skip $(( arithmetic - let arith_expand handle it later
-        if (*p == '$' && *(p + 1) == '(' && *(p + 2) == '(') {
-            // Copy $(( literally - arithmetic expansion handles this
-            result[out_pos++] = *p++;
-            if (out_pos < MAX_CMDSUB_LENGTH - 1) {
-                result[out_pos++] = *p++;
-            }
-            if (out_pos < MAX_CMDSUB_LENGTH - 1) {
-                result[out_pos++] = *p++;
-            }
-            // Copy until matching ))
-            int depth = 1;
-            while (*p && depth > 0 && out_pos < MAX_CMDSUB_LENGTH - 1) {
-                if (*p == '(' && *(p + 1) == '(') {
-                    depth++;
-                    result[out_pos++] = *p++;
-                    if (out_pos < MAX_CMDSUB_LENGTH - 1) {
-                        result[out_pos++] = *p++;
-                    }
-                } else if (*p == ')' && *(p + 1) == ')') {
-                    depth--;
-                    result[out_pos++] = *p++;
-                    if (out_pos < MAX_CMDSUB_LENGTH - 1) {
-                        result[out_pos++] = *p++;
-                    }
-                } else {
-                    result[out_pos++] = *p++;
-                }
-            }
+        if (handle_arith_expr(&p, result, &out_pos)) {
             continue;
         }
+
 
         // Handle \x02 marker (indicates $ is in double-quoted context)
         // Consume the marker and set flag for next $ expansion
