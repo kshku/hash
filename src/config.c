@@ -183,6 +183,181 @@ void config_list_aliases(void) {
     }
 }
 
+static int handle_alias(char *line) {
+    char *alias_def = line + 6;
+    alias_def = trim_whitespace(alias_def);
+
+    char *equals = strchr(alias_def, '=');
+    if (!equals) {
+        return -1;  // Silently fail for bad format
+    }
+
+    *equals = '\0';
+    const char *name = trim_whitespace(alias_def);
+    char *value = trim_whitespace(equals + 1);
+
+    // Remove quotes if present
+    size_t val_len = strlen(value);
+    if (val_len >= 2 &&
+        (value[0] == '"' || value[0] == '\'') &&
+        value[0] == value[val_len - 1]) {
+        value[val_len - 1] = '\0';
+        value++;
+    }
+
+    return config_add_alias(name, value);
+}
+
+static int handle_export(char *line) {
+    char *export_def = line + 7;
+    export_def = trim_whitespace(export_def);
+
+    char *equals = strchr(export_def, '=');
+    if (!equals) {
+        // export without assignment - just mark variable for export
+        // For now, just ignore
+        return 0;
+    }
+
+    *equals = '\0';
+    const char *name = trim_whitespace(export_def);
+    char *value = trim_whitespace(equals + 1);
+
+    // Remove quotes if present
+    size_t val_len = strlen(value);
+    if (val_len >= 2 &&
+        (value[0] == '"' || value[0] == '\'') &&
+        value[0] == value[val_len - 1]) {
+        value[val_len - 1] = '\0';
+        value++;
+    }
+
+    // First expand tilde if present (e.g., ~/bin)
+    char *tilde_expanded = NULL;
+    if (value[0] == '~') {
+        tilde_expanded = expand_tilde_path(value);
+        if (tilde_expanded) {
+            value = tilde_expanded;
+        }
+    }
+
+    // Expand command substitutions (e.g., $(tty), `pwd`)
+    char *cmdsub_result = cmdsub_expand(value);
+    if (cmdsub_result) {
+        value = cmdsub_result;
+    }
+
+    // Expand variables in the value (e.g., $HOME, $PATH)
+    char *var_expanded = varexpand_expand(value, 0);
+    if (var_expanded) {
+        // Strip \x03 IFS markers from the expanded value
+        // These markers are used internally for IFS splitting but should not
+        // be stored in environment variables
+        const char *src = var_expanded;
+        char *dst = var_expanded;
+        while (*src) {
+            if (*src != '\x03') {
+                *dst++ = *src;
+            }
+            src++;
+        }
+        *dst = '\0';
+
+        setenv(name, var_expanded, 1);
+        free(var_expanded);
+    } else {
+        setenv(name, value, 1);
+    }
+
+    free(tilde_expanded);  // Safe to free NULL
+    free(cmdsub_result);   // Safe to free NULL
+    return 0;
+
+}
+
+static int handle_set(char *line) {
+    char *set_def = line + 4;
+    set_def = trim_whitespace(set_def);
+
+    if (strcmp(set_def, "colors=on") == 0) {
+        shell_config.colors_enabled = true;
+        colors_enable();
+        return 0;
+    } else if (strcmp(set_def, "colors=off") == 0) {
+        shell_config.colors_enabled = false;
+        colors_disable();
+        return 0;
+    } else if (strcmp(set_def, "welcome=on") == 0) {
+        shell_config.show_welcome = true;
+        return 0;
+    } else if (strcmp(set_def, "welcome=off") == 0) {
+        shell_config.show_welcome = false;
+        return 0;
+    }
+
+    // Handle PS1 setting
+    if (strncmp(set_def, "PS1=", 4) == 0) {
+        char *ps1_value = set_def + 4;
+
+        // Remove quotes if present
+        size_t val_len = strlen(ps1_value);
+        if (val_len >= 2 &&
+            (ps1_value[0] == '"' || ps1_value[0] == '\'') &&
+            ps1_value[0] == ps1_value[val_len - 1]) {
+            ps1_value[val_len - 1] = '\0';
+            ps1_value++;
+        }
+
+        prompt_set_ps1(ps1_value);
+        return 0;
+    }
+
+    // Handle "set color.<element>=<value>" (e.g., set color.prompt=bold,blue)
+    if (strncmp(set_def, "color.", 6) == 0) {
+        const char *element_start = set_def + 6;
+        char *equals = strchr(element_start, '=');
+        if (equals) {
+            *equals = '\0';
+            char *value = equals + 1;
+
+            // Remove quotes if present
+            size_t val_len = strlen(value);
+            if (val_len >= 2 &&
+                (value[0] == '"' || value[0] == '\'') &&
+                value[0] == value[val_len - 1]) {
+                value[val_len - 1] = '\0';
+                value++;
+            }
+
+            return color_config_set(element_start, value);
+        }
+    }
+
+    // Handle feature toggles
+    if (strcmp(set_def, "syntax_highlight=on") == 0) {
+        color_config.syntax_highlight_enabled = true;
+        return 0;
+    } else if (strcmp(set_def, "syntax_highlight=off") == 0) {
+        color_config.syntax_highlight_enabled = false;
+        return 0;
+    } else if (strcmp(set_def, "autosuggest=on") == 0) {
+        color_config.autosuggestion_enabled = true;
+        return 0;
+    } else if (strcmp(set_def, "autosuggest=off") == 0) {
+        color_config.autosuggestion_enabled = false;
+        return 0;
+    } else if (strcmp(set_def, "danger_highlight=on") == 0) {
+        color_config.danger_highlight_enabled = true;
+        return 0;
+    } else if (strcmp(set_def, "danger_highlight=off") == 0) {
+        color_config.danger_highlight_enabled = false;
+        return 0;
+    }
+
+    return -1;  // Unknown option
+
+}
+
 // Process a single config line (for simple .hashrc format)
 // This handles hash-specific directives: alias, export, set
 int config_process_line(char *line) {
@@ -198,178 +373,17 @@ int config_process_line(char *line) {
 
     // Handle "alias name='value'" or "alias name=value"
     if (strncmp(line, "alias ", 6) == 0) {
-        char *alias_def = line + 6;
-        alias_def = trim_whitespace(alias_def);
-
-        char *equals = strchr(alias_def, '=');
-        if (!equals) {
-            return -1;  // Silently fail for bad format
-        }
-
-        *equals = '\0';
-        const char *name = trim_whitespace(alias_def);
-        char *value = trim_whitespace(equals + 1);
-
-        // Remove quotes if present
-        size_t val_len = strlen(value);
-        if (val_len >= 2 &&
-            (value[0] == '"' || value[0] == '\'') &&
-            value[0] == value[val_len - 1]) {
-            value[val_len - 1] = '\0';
-            value++;
-        }
-
-        return config_add_alias(name, value);
+        return handle_alias(line);
     }
 
     // Handle "export VAR=value"
     if (strncmp(line, "export ", 7) == 0) {
-        char *export_def = line + 7;
-        export_def = trim_whitespace(export_def);
-
-        char *equals = strchr(export_def, '=');
-        if (!equals) {
-            // export without assignment - just mark variable for export
-            // For now, just ignore
-            return 0;
-        }
-
-        *equals = '\0';
-        const char *name = trim_whitespace(export_def);
-        char *value = trim_whitespace(equals + 1);
-
-        // Remove quotes if present
-        size_t val_len = strlen(value);
-        if (val_len >= 2 &&
-            (value[0] == '"' || value[0] == '\'') &&
-            value[0] == value[val_len - 1]) {
-            value[val_len - 1] = '\0';
-            value++;
-        }
-
-        // First expand tilde if present (e.g., ~/bin)
-        char *tilde_expanded = NULL;
-        if (value[0] == '~') {
-            tilde_expanded = expand_tilde_path(value);
-            if (tilde_expanded) {
-                value = tilde_expanded;
-            }
-        }
-
-        // Expand command substitutions (e.g., $(tty), `pwd`)
-        char *cmdsub_result = cmdsub_expand(value);
-        if (cmdsub_result) {
-            value = cmdsub_result;
-        }
-
-        // Expand variables in the value (e.g., $HOME, $PATH)
-        char *var_expanded = varexpand_expand(value, 0);
-        if (var_expanded) {
-            // Strip \x03 IFS markers from the expanded value
-            // These markers are used internally for IFS splitting but should not
-            // be stored in environment variables
-            const char *src = var_expanded;
-            char *dst = var_expanded;
-            while (*src) {
-                if (*src != '\x03') {
-                    *dst++ = *src;
-                }
-                src++;
-            }
-            *dst = '\0';
-
-            setenv(name, var_expanded, 1);
-            free(var_expanded);
-        } else {
-            setenv(name, value, 1);
-        }
-
-        free(tilde_expanded);  // Safe to free NULL
-        free(cmdsub_result);   // Safe to free NULL
-        return 0;
+        return handle_export(line);
     }
 
     // Handle "set option=value"
     if (strncmp(line, "set ", 4) == 0) {
-        char *set_def = line + 4;
-        set_def = trim_whitespace(set_def);
-
-        if (strcmp(set_def, "colors=on") == 0) {
-            shell_config.colors_enabled = true;
-            colors_enable();
-            return 0;
-        } else if (strcmp(set_def, "colors=off") == 0) {
-            shell_config.colors_enabled = false;
-            colors_disable();
-            return 0;
-        } else if (strcmp(set_def, "welcome=on") == 0) {
-            shell_config.show_welcome = true;
-            return 0;
-        } else if (strcmp(set_def, "welcome=off") == 0) {
-            shell_config.show_welcome = false;
-            return 0;
-        }
-
-        // Handle PS1 setting
-        if (strncmp(set_def, "PS1=", 4) == 0) {
-            char *ps1_value = set_def + 4;
-
-            // Remove quotes if present
-            size_t val_len = strlen(ps1_value);
-            if (val_len >= 2 &&
-                (ps1_value[0] == '"' || ps1_value[0] == '\'') &&
-                ps1_value[0] == ps1_value[val_len - 1]) {
-                ps1_value[val_len - 1] = '\0';
-                ps1_value++;
-            }
-
-            prompt_set_ps1(ps1_value);
-            return 0;
-        }
-
-        // Handle "set color.<element>=<value>" (e.g., set color.prompt=bold,blue)
-        if (strncmp(set_def, "color.", 6) == 0) {
-            const char *element_start = set_def + 6;
-            char *equals = strchr(element_start, '=');
-            if (equals) {
-                *equals = '\0';
-                char *value = equals + 1;
-
-                // Remove quotes if present
-                size_t val_len = strlen(value);
-                if (val_len >= 2 &&
-                    (value[0] == '"' || value[0] == '\'') &&
-                    value[0] == value[val_len - 1]) {
-                    value[val_len - 1] = '\0';
-                    value++;
-                }
-
-                return color_config_set(element_start, value);
-            }
-        }
-
-        // Handle feature toggles
-        if (strcmp(set_def, "syntax_highlight=on") == 0) {
-            color_config.syntax_highlight_enabled = true;
-            return 0;
-        } else if (strcmp(set_def, "syntax_highlight=off") == 0) {
-            color_config.syntax_highlight_enabled = false;
-            return 0;
-        } else if (strcmp(set_def, "autosuggest=on") == 0) {
-            color_config.autosuggestion_enabled = true;
-            return 0;
-        } else if (strcmp(set_def, "autosuggest=off") == 0) {
-            color_config.autosuggestion_enabled = false;
-            return 0;
-        } else if (strcmp(set_def, "danger_highlight=on") == 0) {
-            color_config.danger_highlight_enabled = true;
-            return 0;
-        } else if (strcmp(set_def, "danger_highlight=off") == 0) {
-            color_config.danger_highlight_enabled = false;
-            return 0;
-        }
-
-        return -1;  // Unknown option
+        return handle_set(line);
     }
 
     // Unknown directive - return error but don't print warning
