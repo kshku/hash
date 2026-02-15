@@ -163,7 +163,7 @@ static void complete_commands(CompletionResult *result, const char *prefix) {
 }
 
 static void build_full_match(const struct dirent *entry, char *full_match,
-        const char *dir_path, char *tilde_part, bool has_tilde) {
+        const char *dir_path, const char *tilde_part, bool has_tilde) {
     if (has_tilde && tilde_part[0] != '\0') {
         // Reconstruct path with original tilde prefix
         // We need to replace the expanded home path with tilde_part
@@ -247,7 +247,7 @@ static void build_check_path(const struct dirent *entry, const char *dir_path, c
 
 // Returns false if couldn't open the directory
 static void handle_directory(CompletionResult *result, const char *dir_path,
-        const char *filename_prefix, size_t prefix_len, char *tilde_part,
+        const char *filename_prefix, size_t prefix_len, const char *tilde_part,
         bool has_tilde) {
     // Open directory
     DIR *dp = opendir(dir_path);
