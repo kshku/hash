@@ -46,37 +46,37 @@ const char *color_code(const char *code) {
     return colors_enabled ? code : "";
 }
 
-static void color_print_va(const char *color, const char *format, va_list args) {
+static void color_fprint_va(FILE *stream, const char *color, const char *format, va_list args) {
     if (colors_enabled) {
-        printf("%s", color);
+        fprintf(stream, "%s", color);
     }
 
-    vprintf(format, args);
+    vfprintf(stream, format, args);
 
     if (colors_enabled) {
-        printf("%s", COLOR_RESET);
+        fprintf(stream, "%s", COLOR_RESET);
     }
 }
 
-static void color_println_va(const char *color, const char *format, va_list args) {
+static void color_fprintln_va(FILE *stream, const char *color, const char *format, va_list args) {
     if (colors_enabled) {
-        printf("%s", color);
+        fprintf(stream, "%s", color);
     }
 
-    vprintf(format, args);
+    vfprintf(stream, format, args);
 
     if (colors_enabled) {
         printf("%s", COLOR_RESET);
     }
 
-    printf("\n");
+    fprintf(stream, "\n");
 }
 
 // Print with color
 void color_print(const char *color, const char *format, ...) {
     va_list args;
     va_start(args, format);
-    color_print_va(color, format, args);
+    color_fprint_va(stdout, color, format, args);
     va_end(args);
 }
 
@@ -84,7 +84,7 @@ void color_print(const char *color, const char *format, ...) {
 void color_println(const char *color, const char *format, ...) {
     va_list args;
     va_start(args, format);
-    color_println_va(color, format, args);
+    color_fprintln_va(stdout, color, format, args);
     va_end(args);
 }
 
@@ -92,7 +92,7 @@ void color_println(const char *color, const char *format, ...) {
 void color_error(const char *format, ...) {
     va_list args;
     va_start(args, format);
-    color_println_va(COLOR_RED, format, args);
+    color_fprintln_va(stderr, COLOR_RED, format, args);
     va_end(args);
 }
 
@@ -100,7 +100,7 @@ void color_error(const char *format, ...) {
 void color_success(const char *format, ...) {
     va_list args;
     va_start(args, format);
-    color_println(COLOR_GREEN, format, args);
+    color_fprintln_va(stdout, COLOR_GREEN, format, args);
     va_end(args);
 }
 
@@ -108,7 +108,7 @@ void color_success(const char *format, ...) {
 void color_warning(const char *format, ...) {
     va_list args;
     va_start(args, format);
-    color_println_va(COLOR_YELLOW, format, args);
+    color_fprintln_va(stdout, COLOR_YELLOW, format, args);
     va_end(args);
 }
 
@@ -116,6 +116,6 @@ void color_warning(const char *format, ...) {
 void color_info(const char *format, ...) {
     va_list args;
     va_start(args, format);
-    color_println_va(COLOR_CYAN, format, args);
+    color_fprintln_va(stdout, COLOR_CYAN, format, args);
     va_end(args);
 }
