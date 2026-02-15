@@ -46,114 +46,76 @@ const char *color_code(const char *code) {
     return colors_enabled ? code : "";
 }
 
-// Print with color
-void color_print(const char *color, const char *format, ...) {
-    va_list args;
-
+static void color_fprint_va(FILE *stream, const char *color, const char *format, va_list args) {
     if (colors_enabled) {
-        printf("%s", color);
+        fprintf(stream, "%s", color);
     }
 
-    va_start(args, format);
-    vprintf(format, args);
-    va_end(args);
+    vfprintf(stream, format, args);
+
+    if (colors_enabled) {
+        fprintf(stream, "%s", COLOR_RESET);
+    }
+}
+
+static void color_fprintln_va(FILE *stream, const char *color, const char *format, va_list args) {
+    if (colors_enabled) {
+        fprintf(stream, "%s", color);
+    }
+
+    vfprintf(stream, format, args);
 
     if (colors_enabled) {
         printf("%s", COLOR_RESET);
     }
+
+    fprintf(stream, "\n");
+}
+
+// Print with color
+void color_print(const char *color, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    color_fprint_va(stdout, color, format, args);
+    va_end(args);
 }
 
 // Print with color and newline
 void color_println(const char *color, const char *format, ...) {
     va_list args;
-
-    if (colors_enabled) {
-        printf("%s", color);
-    }
-
     va_start(args, format);
-    vprintf(format, args);
+    color_fprintln_va(stdout, color, format, args);
     va_end(args);
-
-    if (colors_enabled) {
-        printf("%s", COLOR_RESET);
-    }
-
-    printf("\n");
 }
 
 // Print error message (red)
 void color_error(const char *format, ...) {
     va_list args;
-
-    if (colors_enabled) {
-        fprintf(stderr, "%s", COLOR_RED);
-    }
-
     va_start(args, format);
-    vfprintf(stderr, format, args);
+    color_fprintln_va(stderr, COLOR_RED, format, args);
     va_end(args);
-
-    if (colors_enabled) {
-        fprintf(stderr, "%s", COLOR_RESET);
-    }
-
-    fprintf(stderr, "\n");
 }
 
 // Print success message (green)
 void color_success(const char *format, ...) {
     va_list args;
-
-    if (colors_enabled) {
-        printf("%s", COLOR_GREEN);
-    }
-
     va_start(args, format);
-    vprintf(format, args);
+    color_fprintln_va(stdout, COLOR_GREEN, format, args);
     va_end(args);
-
-    if (colors_enabled) {
-        printf("%s", COLOR_RESET);
-    }
-
-    printf("\n");
 }
 
 // Print warning message (yellow)
 void color_warning(const char *format, ...) {
     va_list args;
-
-    if (colors_enabled) {
-        printf("%s", COLOR_YELLOW);
-    }
-
     va_start(args, format);
-    vprintf(format, args);
+    color_fprintln_va(stdout, COLOR_YELLOW, format, args);
     va_end(args);
-
-    if (colors_enabled) {
-        printf("%s", COLOR_RESET);
-    }
-
-    printf("\n");
 }
 
 // Print info message (cyan)
 void color_info(const char *format, ...) {
     va_list args;
-
-    if (colors_enabled) {
-        printf("%s", COLOR_CYAN);
-    }
-
     va_start(args, format);
-    vprintf(format, args);
+    color_fprintln_va(stdout, COLOR_CYAN, format, args);
     va_end(args);
-
-    if (colors_enabled) {
-        printf("%s", COLOR_RESET);
-    }
-
-    printf("\n");
 }
