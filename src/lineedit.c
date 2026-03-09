@@ -52,25 +52,29 @@ static struct termios orig_termios;
 static int raw_mode_enabled = 0;
 
 // Special key codes
-#define KEY_NULL       0
-#define KEY_CTRL_A     1
-#define KEY_CTRL_B     2
-#define KEY_CTRL_C     3
-#define KEY_CTRL_D     4
-#define KEY_CTRL_E     5
-#define KEY_CTRL_F     6
-#define KEY_CTRL_H     8
-#define KEY_TAB        9
-#define KEY_CTRL_K     11
-#define KEY_CTRL_L     12
-#define KEY_ENTER      13
-#define KEY_CTRL_U     21
-#define KEY_CTRL_W     23
-#define KEY_ESC        27
-#define KEY_BACKSPACE  127
-#define KEY_CTRL_G     7   // Cancel search
-#define KEY_CTRL_R     18  // Reverse search
-#define KEY_CTRL_S     19  // Forward search
+#define KEY_NULL        0
+#define KEY_CTRL_A      1
+#define KEY_CTRL_B      2
+#define KEY_CTRL_C      3
+#define KEY_CTRL_D      4
+#define KEY_CTRL_E      5
+#define KEY_CTRL_F      6
+#define KEY_CTRL_H      8
+#define KEY_TAB         9
+#define KEY_CTRL_K      11
+#define KEY_CTRL_L      12
+#define KEY_ENTER       13
+#define KEY_CTRL_U      21
+#define KEY_CTRL_W      23
+#define KEY_ESC         27
+#define KEY_BACKSPACE   127
+#define KEY_CTRL_G      7   // Cancel search
+#define KEY_CTRL_R      18  // Reverse search
+#define KEY_CTRL_S      19  // Forward search
+#define KEY_UP_ARROW    ('A' + 256)
+#define KEY_DOWN_ARROW  ('B' + 256)
+#define KEY_RIGHT_ARROW ('C' + 256)
+#define KEY_LEFT_ARROW  ('D' + 256)
 
 // Reverse-i-search state
 typedef struct {
@@ -163,10 +167,10 @@ static int read_key(void) {
             } else {
                 // Arrow keys and other special keys
                 switch (seq[1]) {
-                    case 'A': return 'A' + 256;  // Up arrow
-                    case 'B': return 'B' + 256;  // Down arrow
-                    case 'C': return 'C' + 256;  // Right arrow
-                    case 'D': return 'D' + 256;  // Left arrow
+                    case 'A': return KEY_UP_ARROW;  // Up arrow
+                    case 'B': return KEY_DOWN_ARROW;  // Down arrow
+                    case 'C': return KEY_RIGHT_ARROW;  // Right arrow
+                    case 'D': return KEY_LEFT_ARROW;  // Left arrow
                     case 'H': return KEY_CTRL_A;  // Home
                     case 'F': return KEY_CTRL_E;  // End
                     default: break;
@@ -293,6 +297,8 @@ static void visual_pos(const char *buf, size_t pos, size_t prompt_width,
             // Explicit newline resets to column 0 on next row
             row++;
             col = 0;
+            // No need to check for wrap
+            continue;
         } else if ((unsigned char)buf[i] >= 0x80) {
             // UTF-8 continuation bytes don't start a new character
             // Only count width at the start byte
@@ -309,17 +315,14 @@ static void visual_pos(const char *buf, size_t pos, size_t prompt_width,
                     col++;
                 }
             }
-            // Check for wrap
-            if (term_width > 0 && col >= (size_t)term_width) {
-                row += col / (size_t)term_width;
-                col = col % (size_t)term_width;
-            }
         } else {
             col++;
-            if (term_width > 0 && col >= (size_t)term_width) {
-                row += col / (size_t)term_width;
-                col = col % (size_t)term_width;
-            }
+        }
+
+        // Check for wrap
+        if (term_width > 0 && col >= (size_t)term_width) {
+            row += col / (size_t)term_width;
+            col = col % (size_t)term_width;
         }
     }
 
@@ -385,20 +388,28 @@ static void refresh_line_reset(void) {
     last_cursor_visual_row = 0;
 }
 
+typedef struct {
+    char buf[MAX_LINE_LENGTH];
+    size_t len;
+    size_t pos;
+    bool last_was_tab;
+    const char *prompt;
+} LineEdit;
+
 // Set the cursor to given position using visual row/col calculation.
-static void set_cursor(const char *buf, size_t pos, size_t prev_pos,
-        const char *prompt) {
+// edit->pos should be previous position
+static void set_cursor(LineEdit *edit, size_t new_pos) {
     ssize_t ret;
 
     // Only reposition cursor if it's not at the desired position
-    if (prev_pos == pos) return;
+    if (edit->pos == new_pos) return;
 
     int term_width = get_terminal_width();
-    size_t prompt_width = visible_prompt_length(prompt);
+    size_t prompt_width = visible_prompt_length(edit->prompt);
 
     size_t prev_row, prev_col, new_row, new_col;
-    visual_pos(buf, prev_pos, prompt_width, term_width, &prev_row, &prev_col);
-    visual_pos(buf, pos, prompt_width, term_width, &new_row, &new_col);
+    visual_pos(edit->buf, edit->pos, prompt_width, term_width, &prev_row, &prev_col);
+    visual_pos(edit->buf, new_pos, prompt_width, term_width, &new_row, &new_col);
 
     char cursor_seq[32];
 
@@ -425,16 +436,17 @@ static void set_cursor(const char *buf, size_t pos, size_t prev_pos,
 
     // Update tracked cursor row
     last_cursor_visual_row = new_row;
+
+    // Update the pos
+    edit->pos = new_pos;
 }
 
 // Refresh the line on screen (supports multi-line prompt and buffer)
-static void refresh_line(const char *buf, size_t len, size_t pos, const char *prompt,
-        size_t prev_buffer_lines) {
+static void refresh_line(LineEdit *edit) {
     ssize_t ret;
     int term_width = get_terminal_width();
-    size_t prompt_width = visible_prompt_length(prompt);
-    size_t prompt_newlines = (size_t)count_newlines(prompt);
-    (void)prev_buffer_lines;
+    size_t prompt_width = visible_prompt_length(edit->prompt);
+    size_t prompt_newlines = (size_t)count_newlines(edit->prompt);
 
     // Move cursor up from its current visual row to the prompt start
     size_t total_up = last_cursor_visual_row + prompt_newlines;
@@ -454,39 +466,39 @@ static void refresh_line(const char *buf, size_t len, size_t pos, const char *pr
     (void)ret;
 
     // Write prompt and current buffer (with proper newline handling)
-    write_with_crlf(prompt);
+    write_with_crlf(edit->prompt);
 
     // Apply syntax highlighting if enabled
-    if (colors_enabled && color_config.syntax_highlight_enabled && len > 0) {
-        char *highlighted = syntax_render(buf, len);
+    if (colors_enabled && color_config.syntax_highlight_enabled && edit->len > 0) {
+        char *highlighted = syntax_render(edit->buf, edit->len);
         if (highlighted) {
             write_with_crlf(highlighted);
             free(highlighted);
         } else {
-            write_with_crlf(buf);
+            write_with_crlf(edit->buf);
         }
     } else {
-        write_with_crlf(buf);
+        write_with_crlf(edit->buf);
     }
 
     // Calculate where the end of buffer is visually (for autosuggestion handling)
     size_t end_row, end_col;
-    visual_pos(buf, len, prompt_width, term_width, &end_row, &end_col);
+    visual_pos(edit->buf, edit->len, prompt_width, term_width, &end_row, &end_col);
 
     // Handle deferred wrap: when content fills exactly to the terminal edge,
     // the terminal cursor is in a "pending wrap" state (visually at end of
     // current row, not yet on the next row). Force it to actually wrap so
     // our row/col calculations match the real cursor position.
     if (term_width > 0 && end_col == 0 && end_row > 0 &&
-            (len == 0 || buf[len - 1] != '\n')) {
+            (edit->len == 0 || edit->buf[edit->len - 1] != '\n')) {
         // Write space to force wrap, \r to go to col 0 of the new line
         ret = write(STDOUT_FILENO, " \r", 2);
         (void)ret;
     }
 
     // Show autosuggestion if enabled and cursor is at end of buffer
-    if (colors_enabled && color_config.autosuggestion_enabled && pos == len && len > 0) {
-        const char *suggestion = autosuggest_get(buf, len);
+    if (colors_enabled && color_config.autosuggestion_enabled && edit->pos == edit->len && edit->len > 0) {
+        const char *suggestion = autosuggest_get(edit->buf, edit->len);
         if (suggestion && suggestion[0]) {
             // Write suggestion in dim color
             const char *suggest_color = color_config_get(color_config.suggestion);
@@ -547,7 +559,7 @@ static void refresh_line(const char *buf, size_t len, size_t pos, const char *pr
 
     // Now cursor is at the end of buffer; move it to desired pos
     size_t pos_row, pos_col;
-    visual_pos(buf, pos, prompt_width, term_width, &pos_row, &pos_col);
+    visual_pos(edit->buf, edit->pos, prompt_width, term_width, &pos_row, &pos_col);
 
     if (end_row > pos_row) {
         char up_seq[32];
@@ -585,8 +597,8 @@ void lineedit_cleanup(void) {
 }
 
 bool inside_quote(const char *buf, size_t len) {
-    char single_quote = 0;
-    char double_quote = 0;
+    bool single_quote = 0;
+    bool double_quote = 0;
     // Loop through buffer to check whether we are inside the quote
     // If we are already inside one type of quote, then other type of quote is ignored.
     for (size_t i = 0; i < len; ++i) {
@@ -619,8 +631,7 @@ static void search_cleanup(void) {
 }
 
 // Refresh line with search prompt
-static void search_refresh_line(const char *buf, size_t len, size_t pos,
-                                 size_t prev_buffer_lines, int has_match) {
+static void search_refresh_line(LineEdit *edit, bool has_match) {
     // Build search prompt
     char search_prompt[512];
     const char *mode = (search_state.direction == 1) ? "reverse" : "forward";
@@ -629,12 +640,11 @@ static void search_refresh_line(const char *buf, size_t len, size_t pos,
     snprintf(search_prompt, sizeof(search_prompt),
              "(%s%s-i-search)`%s': ", status, mode, search_state.query);
 
-    refresh_line(buf, len, pos, search_prompt, prev_buffer_lines);
+    refresh_line(edit);
 }
 
 // Perform search and update display
-static void search_update(char *buf, size_t *len, size_t *pos,
-                          size_t newline_count) {
+static void search_update(LineEdit *edit) {
     int result_idx = -1;
     const char *match = NULL;
 
@@ -655,33 +665,516 @@ static void search_update(char *buf, size_t *len, size_t *pos,
 
     // Update buffer with match
     if (match) {
-        safe_strcpy(buf, match, MAX_LINE_LENGTH);
-        *len = safe_strlen(buf, MAX_LINE_LENGTH);
-        *pos = *len;
+        safe_strcpy(edit->buf, match, MAX_LINE_LENGTH);
+        edit->len = safe_strlen(edit->buf, MAX_LINE_LENGTH);
+        edit->pos = edit->len;
         search_state.match_index = result_idx;
     } else if (search_state.query_len == 0) {
         // Empty query - show empty buffer
-        buf[0] = '\0';
-        *len = 0;
-        *pos = 0;
+        edit->buf[0] = '\0';
+        edit->len = 0;
+        edit->pos = 0;
         search_state.match_index = -1;
     }
 
-    search_refresh_line(buf, *len, *pos, newline_count, match != NULL || search_state.query_len == 0);
+    search_refresh_line(edit, match != NULL || search_state.query_len == 0);
+}
+
+// Returns result or NULL
+static char *handle_enter_key(LineEdit *edit) {
+    ssize_t ret;
+
+    // Exit search mode if active, keep the current buffer
+    if (search_state.active) {
+        search_cleanup();
+    }
+
+    // Check for new line escape and quotes
+    if (edit->len > 0 && (edit->buf[edit->len - 1] == '\\' || inside_quote(edit->buf, edit->len))) {
+        edit->last_was_tab = false;
+        if (edit->len < MAX_LINE_LENGTH - 1) {
+            edit->buf[edit->len] = '\n';
+            edit->len++;
+            edit->pos = edit->len;
+            edit->buf[edit->len] = '\0';
+
+            // Write crlf to termial
+            ret = write(STDOUT_FILENO, "\r\n", 2);
+            (void)ret;
+        }
+        return NULL;
+    }
+
+    // Refresh line and move the cursor to end of line
+    // Hack to disable auto suggestion, move cursor one position back
+    if (edit->len > 0) {
+        set_cursor(edit, edit->pos - 1);
+        refresh_line(edit);
+        set_cursor(edit, edit->len);
+    }
+
+    disable_raw_mode();
+
+    // Write newline and flush
+    ret = write(STDOUT_FILENO, "\r\n", 2);
+    (void)ret;
+    fflush(stdout);
+
+    char *result = malloc(edit->len + 1);
+    if (result) {
+        memcpy(result, edit->buf, edit->len);
+        result[edit->len] = '\0';
+    }
+
+    return result;
+}
+
+static char *handle_ctrl_c(LineEdit *edit) {
+    ssize_t ret;
+    if (search_state.active) {
+        // Cancel search and restore original buffer
+        memcpy(edit->buf, search_state.saved_buf, search_state.saved_len + 1);
+        edit->len = search_state.saved_len;
+        edit->pos = search_state.saved_pos;
+        search_cleanup();
+        refresh_line(edit);
+        return NULL;
+    }
+
+    disable_raw_mode();
+
+    // Move to beginning and write ^C on a fresh line
+    ret = write(STDOUT_FILENO, "\r\x1b[K^C\n", 8);
+    (void)ret;
+
+    char *empty = malloc(1);
+    if (empty) empty[0] = '\0';
+    return empty;
+}
+
+static void handle_backspace(LineEdit *edit) {
+    if (search_state.active) {
+        // Delete last character from search query
+        if (search_state.query_len > 0) {
+            search_state.query_len--;
+            search_state.query[search_state.query_len] = '\0';
+            search_state.match_index = -1;  // Reset to search from end
+            search_update(edit);
+        }
+        return;
+    }
+
+    if (edit->pos > 0) {
+        memmove(edit->buf + edit->pos - 1, edit->buf + edit->pos, edit->len - edit->pos);
+        edit->pos--;
+        edit->len--;
+        edit->buf[edit->len] = '\0';
+        refresh_line(edit);
+    }
+}
+
+static void handle_right_arrow(LineEdit *edit) {
+    if (search_state.active) {
+        // Exit search mode, keep command for editing
+        search_cleanup();
+        refresh_line(edit);
+        return;
+    }
+
+    if (edit->pos < edit->len) {
+        set_cursor(edit, edit->pos + 1);
+    } else if (edit->pos == edit->len && colors_enabled && color_config.autosuggestion_enabled) {
+        // At end of buffer - accept autosuggestion if available
+        const char *suggestion = autosuggest_get(edit->buf, edit->len);
+        if (suggestion && suggestion[0]) {
+            size_t sug_len = strlen(suggestion);
+            if (edit->len + sug_len < MAX_LINE_LENGTH - 1) {
+                // Append suggestion to buffer
+                memcpy(edit->buf + edit->len, suggestion, sug_len);
+                edit->len += sug_len;
+                edit->pos = edit->len;
+                edit->buf[edit->len] = '\0';
+                refresh_line(edit);
+                // Invalidate cache since buffer changed
+                autosuggest_invalidate();
+            }
+        }
+    }
+}
+
+static void handle_left_arrow(LineEdit *edit) {
+    if (search_state.active) {
+        // Exit search mode, keep command for editing
+        search_cleanup();
+        refresh_line(edit);
+        return;
+    }
+
+    if (edit->pos > 0) {
+        set_cursor(edit, edit->pos - 1);
+    }
+}
+
+static void handle_up_arrow(LineEdit *edit) {
+    const char *prev = history_prev();
+    if (prev) {
+        // Clear current line and load history entry
+        safe_strcpy(edit->buf, prev, sizeof(edit->buf));
+        edit->len = safe_strlen(edit->buf, sizeof(edit->buf));
+        edit->pos = edit->len;
+        refresh_line(edit);
+        // update the new line count to match current buffer
+    }
+}
+
+static void handle_down_arrow(LineEdit *edit) {
+    const char *next = history_next();
+    if (next) {
+        // Load next history entry
+        safe_strcpy(edit->buf, next, sizeof(edit->buf));
+        edit->len = safe_strlen(edit->buf, sizeof(edit->buf));
+        edit->pos = edit->len;
+        refresh_line(edit);
+        // update the new line count to match current buffer
+    } else {
+        // At end of history, clear line
+        edit->len = 0;
+        edit->pos = 0;
+        edit->buf[0] = '\0';
+        refresh_line(edit);
+        // update the new line count
+    }
+}
+
+static void handle_ctrl_a(LineEdit *edit) {
+    edit->last_was_tab = false;
+    size_t new_pos = edit->pos;
+
+    while (new_pos > 0 && edit->buf[new_pos - 1] != '\n') {
+        new_pos--;
+    }
+
+    if (new_pos != edit->pos) {
+        set_cursor(edit, new_pos);
+    }
+}
+
+static void handle_ctrl_e(LineEdit *edit) {
+    edit->last_was_tab = false;
+    size_t new_pos = edit->pos;
+
+    while (new_pos < edit->len && edit->buf[new_pos + 1] != '\n') {
+        new_pos++;
+    }
+
+    if (new_pos != edit->pos) {
+        set_cursor(edit, new_pos);
+    }
+}
+
+static void handle_ctrl_u(LineEdit *edit) {
+    edit->last_was_tab = false;
+    if (edit->pos > 0) {
+        memmove(edit->buf, edit->buf + edit->pos, edit->len - edit->pos);
+        edit->len -= edit->pos;
+        edit->pos = 0;
+        edit->buf[edit->len] = '\0';
+        refresh_line(edit);
+    }
+}
+
+static void handle_ctrl_k(LineEdit *edit) {
+    edit->last_was_tab = false;
+    edit->len = edit->pos;
+    edit->buf[edit->len] = '\0';
+    refresh_line(edit);
+}
+
+static void handle_ctrl_w(LineEdit *edit) {
+    edit->last_was_tab = false;
+    if (edit->pos > 0) {
+        size_t old_pos = edit->pos;
+
+        while (edit->pos > 0 && isspace(edit->buf[edit->pos - 1])) {
+            edit->pos--;
+        }
+
+        while (edit->pos > 0 && !isspace(edit->buf[edit->pos - 1])) {
+            edit->pos--;
+        }
+
+        memmove(edit->buf + edit->pos, edit->buf + old_pos, edit->len - old_pos);
+        edit->len -= (old_pos - edit->pos);
+        edit->buf[edit->len] = '\0';
+        refresh_line(edit);
+    }
+}
+
+static void handle_ctrl_l(LineEdit *edit) {
+    edit->last_was_tab = false;
+    ssize_t ret = write(STDOUT_FILENO, "\x1b[H\x1b[2J", 7);
+    (void)ret;
+    if (search_state.active) {
+        search_refresh_line(edit, search_state.match_index >= 0 || search_state.query_len == 0);
+    } else {
+        refresh_line(edit);
+    }
+}
+
+static void handle_ctrl_r(LineEdit *edit) {
+    edit->last_was_tab = false;
+    if (!search_state.active) {
+        // Enter search mode
+        search_init(edit->buf, edit->len, edit->pos);
+        search_refresh_line(edit, true);
+    } else {
+        // Cycle to next older match
+        search_state.direction = 1;
+        if (search_state.match_index > 0) {
+            search_state.match_index--;
+        } else if (search_state.match_index < 0 && history_count() > 0) {
+            search_state.match_index = history_count() - 1;
+        }
+        search_update(edit);
+    }
+}
+
+static void handle_ctrl_s(LineEdit *edit) {
+    edit->last_was_tab = false;
+    if (search_state.active) {
+        // Cycle to next newer match
+        search_state.direction = -1;
+        if (search_state.match_index >= 0 && search_state.match_index < history_count() - 1) {
+            search_state.match_index++;
+        }
+        search_update(edit);
+    }
+}
+
+static void handle_ctrl_g(LineEdit *edit) {
+    edit->last_was_tab = false;
+    if (search_state.active) {
+        // Restore original buffer
+        memcpy(edit->buf, search_state.saved_buf, search_state.saved_len + 1);
+        edit->len = search_state.saved_len;
+        edit->pos = search_state.saved_pos;
+        search_cleanup();
+        refresh_line(edit);
+    }
+}
+
+static void handle_tab(LineEdit *edit) {
+    ssize_t ret;
+    // Generate completions
+    CompletionResult *comp = completion_generate(edit->buf, edit->pos);
+
+    if (comp && comp->count > 0) {
+        if (comp->count == 1) {
+            // Single match - complete it
+            // Find start of word being completed
+            size_t word_start = edit->pos;
+            while (word_start > 0 && !isspace(edit->buf[word_start - 1])) {
+                word_start--;
+            }
+
+            // Remove old word
+            memmove(edit->buf + word_start, edit->buf + edit->pos, edit->len - edit->pos);
+            edit->len -= (edit->pos - word_start);
+            edit->pos = word_start;
+
+            // Insert completion
+            const char *match = comp->matches[0];
+            size_t match_len = strlen(match);
+
+            if (edit->len + match_len < MAX_LINE_LENGTH) {
+                memmove(edit->buf + edit->pos + match_len, edit->buf + edit->pos, edit->len - edit->pos);
+                memcpy(edit->buf + edit->pos, match, match_len);
+                edit->pos += match_len;
+                edit->len += match_len;
+                edit->buf[edit->len] = '\0';
+
+                // Add space after completion, but NOT for directories
+                // (directories end with '/' and user likely wants to continue typing)
+                if (edit->len < MAX_LINE_LENGTH - 1 && match_len > 0 && match[match_len - 1] != '/') {
+                    memmove(edit->buf + edit->pos + 1, edit->buf + edit->pos, edit->len - edit->pos);
+                    edit->buf[edit->pos] = ' ';
+                    edit->pos++;
+                    edit->len++;
+                    edit->buf[edit->len] = '\0';
+                }
+
+                refresh_line(edit);
+            }
+
+            edit->last_was_tab = false;
+        } else {
+            // Multiple matches
+            if (edit->last_was_tab) {
+                // Second TAB - show all matches (basenames only)
+                ret = write(STDOUT_FILENO, "\r\n", 2);
+                (void)ret;
+
+                // Calculate column layout using display names (basenames)
+                int term_width = get_terminal_width();
+                size_t max_len = 0;
+
+                // Find longest display name
+                for (int i = 0; i < comp->count; i++) {
+                    const char *display = get_display_name(comp->matches[i]);
+                    size_t mlen = strlen(display);
+                    if (mlen > max_len) max_len = mlen;
+                }
+
+                // Add 2 spaces padding between columns
+                size_t col_width = max_len + 2;
+                int cols_per_row = term_width / col_width;
+                if (cols_per_row < 1) cols_per_row = 1;
+
+                // Display matches in columns (basenames only)
+                for (int i = 0; i < comp->count; i++) {
+                    const char *display = get_display_name(comp->matches[i]);
+
+                    // Colorize directories
+                    struct stat st;
+                    int is_dir = (stat(comp->matches[i], &st) == 0 &&
+                                  S_ISDIR(st.st_mode));
+                    if (is_dir) {
+                        const char *dcolor = color_config_get(
+                            color_config.comp_directory);
+                        ret = write(STDOUT_FILENO, dcolor, strlen(dcolor));
+                        (void)ret;
+                    }
+
+                    ret = write(STDOUT_FILENO, display, strlen(display));
+                    (void)ret;
+
+                    if (is_dir) {
+                        ret = write(STDOUT_FILENO, COLOR_RESET,
+                                    strlen(COLOR_RESET));
+                        (void)ret;
+                    }
+
+                    // Add padding to align columns
+                    size_t display_len = strlen(display);
+                    if ((i + 1) % cols_per_row != 0 && i < comp->count - 1) {
+                        // Not end of row, add padding
+                        for (size_t pad = 0; pad < col_width - display_len; pad++) {
+                            ret = write(STDOUT_FILENO, " ", 1);
+                            (void)ret;
+                        }
+                    } else {
+                        // End of row or last item
+                        ret = write(STDOUT_FILENO, "\r\n", 2);
+                        (void)ret;
+                    }
+                }
+
+                // Ensure we end with newline
+                if (comp->count % cols_per_row != 0) {
+                    ret = write(STDOUT_FILENO, "\r\n", 2);
+                    (void)ret;
+                }
+
+                // Redraw prompt and line
+                refresh_line(edit);
+                edit->last_was_tab = false;
+            } else {
+                // First TAB - complete common prefix
+                if (comp->common_prefix) {
+                    size_t word_start = edit->pos;
+                    while (word_start > 0 && !isspace(edit->buf[word_start - 1])) {
+                        word_start--;
+                    }
+
+                    size_t prefix_len = strlen(comp->common_prefix);
+                    size_t current_word_len = edit->pos - word_start;
+
+                    // Only insert if common prefix is longer than current word
+                    if (prefix_len > current_word_len) {
+                        // Remove current word
+                        memmove(edit->buf + word_start, edit->buf + edit->pos, edit->len - edit->pos);
+                        edit->len -= (edit->pos - word_start);
+                        edit->pos = word_start;
+
+                        // Insert common prefix
+                        if (edit->len + prefix_len < MAX_LINE_LENGTH) {
+                            memmove(edit->buf + edit->pos + prefix_len, edit->buf + edit->pos, edit->len - edit->pos);
+                            memcpy(edit->buf + edit->pos, comp->common_prefix, prefix_len);
+                            edit->pos += prefix_len;
+                            edit->len += prefix_len;
+                            edit->buf[edit->len] = '\0';
+                            refresh_line(edit);
+                        }
+                    }
+                }
+                edit->last_was_tab = true;
+            }
+        }
+    } else {
+        // No matches - beep
+        ret = write(STDOUT_FILENO, "\a", 1);
+        (void)ret;
+        edit->last_was_tab = false;
+    }
+
+    completion_free_result(comp);
+}
+
+static void handle_default(LineEdit *edit, int c) {
+    ssize_t ret;
+    // Regular character - reset tab tracking
+    edit->last_was_tab = false;
+    if (search_state.active) {
+        // Add character to search query
+        if (c >= 32 && c < 127 && search_state.query_len < sizeof(search_state.query) - 1) {
+            search_state.query[search_state.query_len++] = (char)c;
+            search_state.query[search_state.query_len] = '\0';
+            search_state.match_index = -1;  // Reset to search from end
+            search_update(edit);
+        }
+        return;
+    }
+    if (c >= 32 && c < 127 && edit->len < MAX_LINE_LENGTH - 1) {
+        memmove(edit->buf + edit->pos + 1, edit->buf + edit->pos, edit->len - edit->pos);
+        edit->buf[edit->pos] = (char)c;
+        edit->pos++;
+        edit->len++;
+        edit->buf[edit->len] = '\0';
+
+        // Always refresh when syntax highlighting is on, or when inserting mid-line
+        if (edit->pos < edit->len || (colors_enabled && color_config.syntax_highlight_enabled)) {
+            refresh_line(edit);
+        } else {
+            // Fast path: append at end without syntax highlighting
+            ret = write(STDOUT_FILENO, &c, 1);
+            (void)ret;
+            // Update visual row tracking since terminal may wrap
+            int tw = get_terminal_width();
+            size_t pw = visible_prompt_length(edit->prompt);
+            size_t vr, vc;
+            visual_pos(edit->buf, edit->pos, pw, tw, &vr, &vc);
+            last_cursor_visual_row = vr;
+            // Force deferred wrap if at exact terminal edge
+            if (tw > 0 && vc == 0 && vr > 0) {
+                ret = write(STDOUT_FILENO, " \r", 2);
+                (void)ret;
+            }
+        }
+    }
 }
 
 // Read a line with editing capabilities
 char *lineedit_read_line(const char *prompt) {
-    static char buf[MAX_LINE_LENGTH];
-    static int last_was_tab = 0;
-    size_t len = 0;
-    size_t pos = 0;
-    ssize_t ret;
+    static LineEdit edit = (LineEdit){0};
+    char *result = NULL;
 
     // Clear buffer and state
-    memset(buf, 0, sizeof(buf));
-    len = 0;
-    pos = 0;
+    memset(edit.buf, 0, sizeof(edit.buf));
+    edit.len = 0;
+    edit.pos = 0;
+    edit.prompt = prompt ? prompt : "";
+
+    refresh_line_reset();
 
     // Enable raw mode first
     if (enable_raw_mode() == -1) {
@@ -689,11 +1182,9 @@ char *lineedit_read_line(const char *prompt) {
         char *line = NULL;
         size_t bufsize = 0;
 
-        if (prompt) {
-            // POSIX: interactive shell prompts go to stderr
-            fprintf(stderr, "%s", prompt);
-            fflush(stderr);
-        }
+        // POSIX: interactive shell prompts go to stderr
+        fprintf(stderr, "%s", edit.prompt);
+        fflush(stderr);
 
         if (getline(&line, &bufsize, stdin) == -1) {
             if (feof(stdin)) {
@@ -709,14 +1200,8 @@ char *lineedit_read_line(const char *prompt) {
 
     // Display prompt after entering raw mode
     // Use write_with_crlf to handle newlines properly in raw mode
-    if (prompt) {
-        write_with_crlf(prompt);
-        fflush(stdout);
-    }
-
-    const char *prompt_str = prompt ? prompt : "";
-    size_t newline_count = 0;
-    refresh_line_reset();
+    write_with_crlf(edit.prompt);
+    fflush(stdout);
 
     while (1) {
         int c = read_key();
@@ -725,511 +1210,87 @@ char *lineedit_read_line(const char *prompt) {
 
         switch (c) {
             case KEY_ENTER:
-                // Exit search mode if active, keep the current buffer
-                if (search_state.active) {
-                    search_cleanup();
+                if ((result = handle_enter_key(&edit)) != NULL) {
+                    return result;
                 }
-
-                // Check for new line escape and quotes
-                if (len > 0 && (buf[len - 1] == '\\' || inside_quote(buf, len))) {
-                    last_was_tab = 0;
-                    if (len < MAX_LINE_LENGTH - 1) {
-                        buf[len] = '\n';
-                        len++;
-                        pos = len;
-                        buf[len] = '\0';
-                        newline_count++;
-
-                        // Write crlf to termial
-                        ret = write(STDOUT_FILENO, "\r\n", 2);
-                        (void)ret;
-                    }
-                    break;
-                }
-
-                // Refresh line and move the cursor to end of line
-                // Hack to disable auto suggestion, move cursor one position back
-                if (len > 0) {
-                    set_cursor(buf, pos - 1, pos, prompt_str);
-                    pos--;
-                    refresh_line(buf, len, pos, prompt_str, newline_count);
-                    set_cursor(buf, len, pos, prompt_str);
-                }
-
-                disable_raw_mode();
-
-                // Write newline and flush
-                ret = write(STDOUT_FILENO, "\r\n", 2);
-                (void)ret;
-                fflush(stdout);
-
-                char *result = malloc(len + 1);
-                if (result) {
-                    memcpy(result, buf, len);
-                    result[len] = '\0';
-                }
-                return result;
+                break;
 
             case KEY_CTRL_D:
-                if (len == 0) {
+                if (edit.len == 0) {
                     disable_raw_mode();
                     return NULL;
                 }
                 break;
 
             case KEY_CTRL_C:
-                if (search_state.active) {
-                    // Cancel search and restore original buffer
-                    memcpy(buf, search_state.saved_buf, search_state.saved_len + 1);
-                    len = search_state.saved_len;
-                    pos = search_state.saved_pos;
-                    search_cleanup();
-                    refresh_line(buf, len, pos, prompt_str, newline_count);
-                    break;
+                if ((result = handle_ctrl_c(&edit)) != NULL) {
+                    return result;
                 }
-
-                disable_raw_mode();
-
-                // Move to beginning and write ^C on a fresh line
-                ret = write(STDOUT_FILENO, "\r\x1b[K^C\n", 8);
-                (void)ret;
-
-                char *empty = malloc(1);
-                if (empty) empty[0] = '\0';
-                return empty;
+                break;
 
             case KEY_BACKSPACE:
             case KEY_CTRL_H:
-                if (search_state.active) {
-                    // Delete last character from search query
-                    if (search_state.query_len > 0) {
-                        search_state.query_len--;
-                        search_state.query[search_state.query_len] = '\0';
-                        search_state.match_index = -1;  // Reset to search from end
-                        search_update(buf, &len, &pos, newline_count);
-                    }
-                    break;
-                }
-                if (pos > 0) {
-                    char removed_char = buf[pos - 1];
-                    memmove(buf + pos - 1, buf + pos, len - pos);
-                    pos--;
-                    len--;
-                    buf[len] = '\0';
-                    refresh_line(buf, len, pos, prompt_str, newline_count);
-                    if (removed_char == '\n') newline_count--;
-                }
+                handle_backspace(&edit);
                 break;
 
-            case 'C' + 256:  // Right arrow
-                if (search_state.active) {
-                    // Exit search mode, keep command for editing
-                    search_cleanup();
-                    refresh_line(buf, len, pos, prompt_str, newline_count);
-                    break;
-                }
-                if (pos < len) {
-                    size_t old_pos = pos;
-                    pos++;
-                    set_cursor(buf, pos, old_pos, prompt_str);
-                } else if (pos == len && colors_enabled && color_config.autosuggestion_enabled) {
-                    // At end of buffer - accept autosuggestion if available
-                    const char *suggestion = autosuggest_get(buf, len);
-                    if (suggestion && suggestion[0]) {
-                        size_t sug_len = strlen(suggestion);
-                        if (len + sug_len < MAX_LINE_LENGTH - 1) {
-                            // Append suggestion to buffer
-                            memcpy(buf + len, suggestion, sug_len);
-                            len += sug_len;
-                            pos = len;
-                            buf[len] = '\0';
-                            refresh_line(buf, len, pos, prompt_str, newline_count);
-                            for (size_t i = 0; i < sug_len; ++i) {
-                                if (suggestion[i] == '\n') {
-                                    newline_count++;
-                                }
-                            }
-                            // Invalidate cache since buffer changed
-                            autosuggest_invalidate();
-                        }
-                    }
-                }
+            case KEY_RIGHT_ARROW:  // Right arrow
+                handle_right_arrow(&edit);
                 break;
 
-            case 'D' + 256:  // Left arrow
-                if (search_state.active) {
-                    // Exit search mode, keep command for editing
-                    search_cleanup();
-                    refresh_line(buf, len, pos, prompt_str, newline_count);
-                    break;
-                }
-                if (pos > 0) {
-                    size_t old_pos = pos;
-                    pos--;
-                    set_cursor(buf, pos, old_pos, prompt_str);
-                }
+            case KEY_LEFT_ARROW:  // Left arrow
+                handle_left_arrow(&edit);
                 break;
 
-            case 'A' + 256:  // Up arrow - previous history
-                {
-                    const char *prev = history_prev();
-                    if (prev) {
-                        // Clear current line and load history entry
-                        safe_strcpy(buf, prev, sizeof(buf));
-                        len = safe_strlen(buf, sizeof(buf));
-                        pos = len;
-                        refresh_line(buf, len, pos, prompt_str, newline_count);
-                        // update the new line count to match current buffer
-                        newline_count = count_newlines(buf);
-                    }
-                }
+            case KEY_UP_ARROW:  // Up arrow - previous history
+                handle_up_arrow(&edit);
                 break;
 
-            case 'B' + 256:  // Down arrow - next history
-                {
-                    const char *next = history_next();
-                    if (next) {
-                        // Load next history entry
-                        safe_strcpy(buf, next, sizeof(buf));
-                        len = safe_strlen(buf, sizeof(buf));
-                        pos = len;
-                        refresh_line(buf, len, pos, prompt_str, newline_count);
-                        // update the new line count to match current buffer
-                        newline_count = count_newlines(buf);
-                    } else {
-                        // At end of history, clear line
-                        len = 0;
-                        pos = 0;
-                        buf[0] = '\0';
-                        refresh_line(buf, len, pos, prompt_str, newline_count);
-                        // update the new line count
-                        newline_count = 0;
-                    }
-                }
+            case KEY_DOWN_ARROW:  // Down arrow - next history
+                handle_down_arrow(&edit);
                 break;
 
             case KEY_CTRL_A:  // Beginning
-                last_was_tab = 0;
-                {
-                    size_t old_pos = pos;
-                    while (pos > 0 && buf[pos - 1] != '\n') {
-                        pos--;
-                    }
-                    if (pos != old_pos) {
-                        set_cursor(buf, pos, old_pos, prompt_str);
-                    }
-                }
+                handle_ctrl_a(&edit);
                 break;
 
             case KEY_CTRL_E:  // End
-                last_was_tab = 0;
-                {
-                    size_t old_pos = pos;
-                    while (pos < len && buf[pos + 1] != '\n') {
-                        pos++;
-                    }
-                    if (pos != old_pos) {
-                        set_cursor(buf, pos, old_pos, prompt_str);
-                    }
-                }
+                handle_ctrl_e(&edit);
                 break;
 
             case KEY_CTRL_U:  // Delete to beginning
-                last_was_tab = 0;
-                if (pos > 0) {
-                    memmove(buf, buf + pos, len - pos);
-                    len -= pos;
-                    pos = 0;
-                    buf[len] = '\0';
-                    refresh_line(buf, len, pos, prompt_str, newline_count);
-                    newline_count = count_newlines(buf);
-                }
+                handle_ctrl_u(&edit);
                 break;
 
             case KEY_CTRL_K:  // Delete to end
-                last_was_tab = 0;
-                len = pos;
-                buf[len] = '\0';
-                refresh_line(buf, len, pos, prompt_str, newline_count);
-                newline_count = count_newlines(buf);
+                handle_ctrl_k(&edit);
                 break;
 
             case KEY_CTRL_W:  // Delete word backward
-                last_was_tab = 0;
-                if (pos > 0) {
-                    size_t old_pos = pos;
-
-                    while (pos > 0 && isspace(buf[pos - 1])) {
-                        pos--;
-                    }
-
-                    while (pos > 0 && !isspace(buf[pos - 1])) {
-                        pos--;
-                    }
-
-                    memmove(buf + pos, buf + old_pos, len - old_pos);
-                    len -= (old_pos - pos);
-                    buf[len] = '\0';
-                    refresh_line(buf, len, pos, prompt_str, newline_count);
-                    newline_count = count_newlines(buf);
-                }
+                handle_ctrl_w(&edit);
                 break;
 
             case KEY_CTRL_L:  // Clear screen
-                last_was_tab = 0;
-                ret = write(STDOUT_FILENO, "\x1b[H\x1b[2J", 7);
-                (void)ret;
-                if (search_state.active) {
-                    search_refresh_line(buf, len, pos, newline_count, search_state.match_index >= 0 || search_state.query_len == 0);
-                } else {
-                    refresh_line(buf, len, pos, prompt_str, newline_count);
-                }
-                newline_count = count_newlines(buf);
+                handle_ctrl_l(&edit);
                 break;
 
             case KEY_CTRL_R:  // Reverse incremental search
-                last_was_tab = 0;
-                if (!search_state.active) {
-                    // Enter search mode
-                    search_init(buf, len, pos);
-                    search_refresh_line(buf, len, pos, newline_count, 1);
-                } else {
-                    // Cycle to next older match
-                    search_state.direction = 1;
-                    if (search_state.match_index > 0) {
-                        search_state.match_index--;
-                    } else if (search_state.match_index < 0 && history_count() > 0) {
-                        search_state.match_index = history_count() - 1;
-                    }
-                    search_update(buf, &len, &pos, newline_count);
-                }
+                handle_ctrl_r(&edit);
                 break;
 
             case KEY_CTRL_S:  // Forward incremental search
-                last_was_tab = 0;
-                if (search_state.active) {
-                    // Cycle to next newer match
-                    search_state.direction = -1;
-                    if (search_state.match_index >= 0 && search_state.match_index < history_count() - 1) {
-                        search_state.match_index++;
-                    }
-                    search_update(buf, &len, &pos, newline_count);
-                }
+                handle_ctrl_s(&edit);
                 break;
 
             case KEY_CTRL_G:  // Cancel search
-                last_was_tab = 0;
-                if (search_state.active) {
-                    // Restore original buffer
-                    memcpy(buf, search_state.saved_buf, search_state.saved_len + 1);
-                    len = search_state.saved_len;
-                    pos = search_state.saved_pos;
-                    search_cleanup();
-                    refresh_line(buf, len, pos, prompt_str, newline_count);
-                }
+                handle_ctrl_g(&edit);
                 break;
 
             case KEY_TAB:
-                {
-                    // Generate completions
-                    CompletionResult *comp = completion_generate(buf, pos);
-
-                    if (comp && comp->count > 0) {
-                        if (comp->count == 1) {
-                            // Single match - complete it
-                            // Find start of word being completed
-                            size_t word_start = pos;
-                            while (word_start > 0 && !isspace(buf[word_start - 1])) {
-                                word_start--;
-                            }
-
-                            // Remove old word
-                            memmove(buf + word_start, buf + pos, len - pos);
-                            len -= (pos - word_start);
-                            pos = word_start;
-
-                            // Insert completion
-                            const char *match = comp->matches[0];
-                            size_t match_len = strlen(match);
-
-                            if (len + match_len < MAX_LINE_LENGTH) {
-                                memmove(buf + pos + match_len, buf + pos, len - pos);
-                                memcpy(buf + pos, match, match_len);
-                                pos += match_len;
-                                len += match_len;
-                                buf[len] = '\0';
-
-                                // Add space after completion, but NOT for directories
-                                // (directories end with '/' and user likely wants to continue typing)
-                                if (len < MAX_LINE_LENGTH - 1 && match_len > 0 && match[match_len - 1] != '/') {
-                                    memmove(buf + pos + 1, buf + pos, len - pos);
-                                    buf[pos] = ' ';
-                                    pos++;
-                                    len++;
-                                    buf[len] = '\0';
-                                }
-
-                                refresh_line(buf, len, pos, prompt_str, newline_count);
-                                // newline_count = count_newlines(buf);
-                            }
-
-                            last_was_tab = 0;
-                        } else {
-                            // Multiple matches
-                            if (last_was_tab) {
-                                // Second TAB - show all matches (basenames only)
-                                ret = write(STDOUT_FILENO, "\r\n", 2);
-                                (void)ret;
-
-                                // Calculate column layout using display names (basenames)
-                                int term_width = get_terminal_width();
-                                size_t max_len = 0;
-
-                                // Find longest display name
-                                for (int i = 0; i < comp->count; i++) {
-                                    const char *display = get_display_name(comp->matches[i]);
-                                    size_t mlen = strlen(display);
-                                    if (mlen > max_len) max_len = mlen;
-                                }
-
-                                // Add 2 spaces padding between columns
-                                size_t col_width = max_len + 2;
-                                int cols_per_row = term_width / col_width;
-                                if (cols_per_row < 1) cols_per_row = 1;
-
-                                // Display matches in columns (basenames only)
-                                for (int i = 0; i < comp->count; i++) {
-                                    const char *display = get_display_name(comp->matches[i]);
-
-                                    // Colorize directories
-                                    struct stat st;
-                                    int is_dir = (stat(comp->matches[i], &st) == 0 &&
-                                                  S_ISDIR(st.st_mode));
-                                    if (is_dir) {
-                                        const char *dcolor = color_config_get(
-                                            color_config.comp_directory);
-                                        ret = write(STDOUT_FILENO, dcolor, strlen(dcolor));
-                                        (void)ret;
-                                    }
-
-                                    ret = write(STDOUT_FILENO, display, strlen(display));
-                                    (void)ret;
-
-                                    if (is_dir) {
-                                        ret = write(STDOUT_FILENO, COLOR_RESET,
-                                                    strlen(COLOR_RESET));
-                                        (void)ret;
-                                    }
-
-                                    // Add padding to align columns
-                                    size_t display_len = strlen(display);
-                                    if ((i + 1) % cols_per_row != 0 && i < comp->count - 1) {
-                                        // Not end of row, add padding
-                                        for (size_t pad = 0; pad < col_width - display_len; pad++) {
-                                            ret = write(STDOUT_FILENO, " ", 1);
-                                            (void)ret;
-                                        }
-                                    } else {
-                                        // End of row or last item
-                                        ret = write(STDOUT_FILENO, "\r\n", 2);
-                                        (void)ret;
-                                    }
-                                }
-
-                                // Ensure we end with newline
-                                if (comp->count % cols_per_row != 0) {
-                                    ret = write(STDOUT_FILENO, "\r\n", 2);
-                                    (void)ret;
-                                }
-
-                                // Redraw prompt and line
-                                refresh_line(buf, len, pos, prompt_str, newline_count);
-                                // newline_count = count_newlines(buf);
-                                last_was_tab = 0;
-                            } else {
-                                // First TAB - complete common prefix
-                                if (comp->common_prefix) {
-                                    size_t word_start = pos;
-                                    while (word_start > 0 && !isspace(buf[word_start - 1])) {
-                                        word_start--;
-                                    }
-
-                                    size_t prefix_len = strlen(comp->common_prefix);
-                                    size_t current_word_len = pos - word_start;
-
-                                    // Only insert if common prefix is longer than current word
-                                    if (prefix_len > current_word_len) {
-                                        // Remove current word
-                                        memmove(buf + word_start, buf + pos, len - pos);
-                                        len -= (pos - word_start);
-                                        pos = word_start;
-
-                                        // Insert common prefix
-                                        if (len + prefix_len < MAX_LINE_LENGTH) {
-                                            memmove(buf + pos + prefix_len, buf + pos, len - pos);
-                                            memcpy(buf + pos, comp->common_prefix, prefix_len);
-                                            pos += prefix_len;
-                                            len += prefix_len;
-                                            buf[len] = '\0';
-                                            refresh_line(buf, len, pos, prompt_str, newline_count);
-                                            // newline_count = count_newlines(buf);
-                                        }
-                                    }
-                                }
-                                last_was_tab = 1;
-                            }
-                        }
-                    } else {
-                        // No matches - beep
-                        ret = write(STDOUT_FILENO, "\a", 1);
-                        (void)ret;
-                        last_was_tab = 0;
-                    }
-
-                    completion_free_result(comp);
-                }
+                handle_tab(&edit);
                 break;
 
             default:
-                // Regular character - reset tab tracking
-                last_was_tab = 0;
-                if (search_state.active) {
-                    // Add character to search query
-                    if (c >= 32 && c < 127 && search_state.query_len < sizeof(search_state.query) - 1) {
-                        search_state.query[search_state.query_len++] = (char)c;
-                        search_state.query[search_state.query_len] = '\0';
-                        search_state.match_index = -1;  // Reset to search from end
-                        search_update(buf, &len, &pos, newline_count);
-                    }
-                    break;
-                }
-                if (c >= 32 && c < 127 && len < MAX_LINE_LENGTH - 1) {
-                    memmove(buf + pos + 1, buf + pos, len - pos);
-                    buf[pos] = (char)c;
-                    pos++;
-                    len++;
-                    buf[len] = '\0';
-
-                    // Always refresh when syntax highlighting is on, or when inserting mid-line
-                    if (pos < len || (colors_enabled && color_config.syntax_highlight_enabled)) {
-                        refresh_line(buf, len, pos, prompt_str, newline_count);
-                    } else {
-                        // Fast path: append at end without syntax highlighting
-                        ret = write(STDOUT_FILENO, &c, 1);
-                        (void)ret;
-                        // Update visual row tracking since terminal may wrap
-                        int tw = get_terminal_width();
-                        size_t pw = visible_prompt_length(prompt_str);
-                        size_t vr, vc;
-                        visual_pos(buf, pos, pw, tw, &vr, &vc);
-                        last_cursor_visual_row = vr;
-                        // Force deferred wrap if at exact terminal edge
-                        if (tw > 0 && vc == 0 && vr > 0) {
-                            ret = write(STDOUT_FILENO, " \r", 2);
-                            (void)ret;
-                        }
-                    }
-                }
+                handle_default(&edit, c);
                 break;
         }
     }
