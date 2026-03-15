@@ -223,7 +223,7 @@ static void set_variable(const char *name, long value) {
 
 static bool is_special_variable(char c) {
     if (char_in_string(c, "$?!#@*-0")) {
-            return true;
+        return true;
     }
 
     return false;

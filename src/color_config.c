@@ -177,7 +177,7 @@ int color_config_parse(const char *color_str, char *buf, size_t buf_size) {
     while (token != NULL) {
         // Trim leading whitespace
         while (char_in_string(*token, " \t")) {
-                token++;
+            token++;
         }
 
         // Trim trailing whitespace

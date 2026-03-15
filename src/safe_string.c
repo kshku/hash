@@ -128,7 +128,7 @@ void safe_trim(char *str) {
 
 // Safe append helper - explicitly bounds-checked for static analyzers
 size_t safe_append(char *output, size_t out_pos, size_t max_pos, const char *str) {
-    if (!str || out_pos >= max_pos) {
+    if (!output || !str || out_pos >= max_pos) {
         return out_pos;
     }
 

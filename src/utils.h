@@ -11,7 +11,7 @@
  *
  * @return Returns true if string has character.
  *
- * @note If the string includes NULL character (`\0`) for comparision,
+ * @note If the string includes NULL character (`\0`) for comparison,
  *      It should be the first character in the string.
  * @note The str should not be ""
  * @note If str[0] == '\0', it is compared with the character (`c`) and not considered as the string termination.
@@ -20,6 +20,6 @@
  * @example char_in_string(c, "\0abc?!");
  * char_in_string(c, "ab\0c?!"); // wrong
  */
-bool char_in_string(char c, char *str);
+bool char_in_string(char c, const char *str);
 
 #endif // UTILS_H
