@@ -11,6 +11,7 @@
 #include "safe_string.h"
 #include "colors.h"
 #include "hash.h"
+#include "utils.h"
 
 // History storage
 static char **history = NULL;
@@ -405,7 +406,7 @@ char *history_expand(const char *line) {
 
             char prefix[256];
             size_t prefix_len = 0;
-            while (*p && (isalnum(*p) || *p == '_' || *p == '-') && prefix_len < sizeof(prefix) - 1) {
+            while (*p && (isalnum(*p) || char_in_string(*p, "_-")) && prefix_len < sizeof(prefix) - 1) {
                 prefix[prefix_len++] = *p++;
             }
             prefix[prefix_len] = '\0';

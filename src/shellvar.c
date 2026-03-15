@@ -3,6 +3,7 @@
 #include <string.h>
 #include "shellvar.h"
 #include "hash.h"
+#include "utils.h"
 
 // Shell variable entry
 typedef struct ShellVar {
@@ -329,12 +330,7 @@ static void print_quoted_value(const char *value) {
     // Check if value needs quoting (contains spaces, special chars, etc.)
     bool needs_quote = false;
     for (const char *p = value; *p; p++) {
-        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\'' ||
-            *p == '"' || *p == '\\' || *p == '$' || *p == '`' ||
-            *p == '!' || *p == '*' || *p == '?' || *p == '[' ||
-            *p == ']' || *p == '(' || *p == ')' || *p == '{' ||
-            *p == '}' || *p == '|' || *p == '&' || *p == ';' ||
-            *p == '<' || *p == '>' || *p == '#' || *p == '~') {
+        if (char_in_string(*p, " \t\n'\"\\$`!*?[](){}|&;<>#~")) {
             needs_quote = true;
             break;
         }

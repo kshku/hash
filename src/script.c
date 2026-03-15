@@ -26,6 +26,7 @@
 #include "arith.h"
 #include "cmdsub.h"
 #include "expand.h"
+#include "utils.h"
 
 // Global script state
 ScriptState script_state;
@@ -860,7 +861,7 @@ LineType script_classify_line(const char *line) {
 
     while (*line && isspace(*line)) line++;
 
-    if (*line == '\0' || *line == '#') {
+    if (char_in_string(*line, "\0#")) {
         return LINE_EMPTY;
     }
 
@@ -1149,10 +1150,10 @@ static int execute_simple_line(const char *line) {
             while (*after) {
                 // Skip fd number if present
                 while (isdigit(*after)) after++;
-                if (*after == '<' || *after == '>') {
+                if (char_in_string(*after, "<>")) {
                     // Skip the redirection operator
                     after++;
-                    if (*after == '>' || *after == '&') after++;
+                    if (char_in_string(*after, ">&")) after++;
                     // Skip whitespace
                     while (*after && isspace(*after)) after++;
                     // Skip the filename (until whitespace or another operator)
@@ -1167,7 +1168,7 @@ static int execute_simple_line(const char *line) {
                 }
             }
             // Now check if there's a chain operator or pipe
-            if (*after == '&' || *after == ';' || *after == '|') {
+            if (char_in_string(*after, "&;|")) {
                 // Has chain operator or pipe after subshell - let chain_parse handle it
                 goto use_chain_parse;
             }
@@ -1953,7 +1954,7 @@ static int process_for(const char *line) {
     while (*p && isspace(*p)) p++;
 
     // Check for "in"
-    if (strncmp(p, "in", 2) == 0 && (isspace(p[2]) || p[2] == '\0' || p[2] == ';')) {
+    if (strncmp(p, "in", 2) == 0 && (isspace(p[2]) || char_in_string(p[2], "\0;"))) {
         p += 2;
         while (*p && isspace(*p)) p++;
 
@@ -2758,7 +2759,7 @@ static int execute_case_body(const char *body, const char *word) {
                     }
                     if (strncmp(s, "esac", 4) == 0 &&
                         (s == after_paren || isspace(*(s-1)) || *(s-1) == ';') &&
-                        (s[4] == '\0' || isspace(s[4]) || s[4] == ';')) {
+                        (char_in_string(s[4], "\0;") || isspace(s[4]))) {
                         if (nested_depth > 0) nested_depth--;
                         s += 3;  // Skip past 'esac'
                         continue;
@@ -2842,8 +2843,7 @@ static char *remove_shell_quotes(const char *str) {
             if (in_double) {
                 // In double quotes, backslash only escapes $ ` " \ newline
                 char next = str[i + 1];
-                if (next == '$' || next == '`' || next == '"' ||
-                    next == '\\' || next == '\n') {
+                if (char_in_string(next, "$`\"\\\n")) {
                     i++;  // Skip backslash
                     if (next != '\n') {  // Backslash-newline is removed entirely
                         result[j++] = next;
@@ -2892,7 +2892,7 @@ static char *remove_shell_quotes_for_pattern(const char *str) {
             i++;  // Skip marker
             char next = str[i];
             // Escape fnmatch pattern metacharacters: * ? [ ] and backslash
-            if (next == '\\' || next == '*' || next == '?' || next == '[' || next == ']') {
+            if (char_in_string(next, "\\*?[]")) {
                 result[j++] = '\\';  // Escape for fnmatch
             }
             result[j++] = next;  // Copy literal character
@@ -2922,8 +2922,7 @@ static char *remove_shell_quotes_for_pattern(const char *str) {
                 if (in_double) {
                     // In double quotes, backslash only escapes $ ` " \ newline
                     char next = str[i + 1];
-                    if (next == '$' || next == '`' || next == '"' ||
-                        next == '\\' || next == '\n') {
+                    if (char_in_string(next, "$`\"\\\n")) {
                         i++;  // Skip backslash
                         if (next == '\\') {
                             // Escaped backslash - output as escaped for fnmatch
@@ -3090,7 +3089,7 @@ static char *expand_case_word(const char *word) {
                 }
                 // Within expansion regions, protect backslashes and quotes
                 // so remove_shell_quotes treats them as literal
-                if (in_expansion && (*read == '\\' || *read == '\'' || *read == '"')) {
+                if (in_expansion && char_in_string(*read, "\\'\"")) {
                     *write++ = '\x01';
                 }
                 *write++ = *read++;
@@ -3281,7 +3280,7 @@ static int process_case(const char *line) {
         // Check for 'esac' keyword (decreases depth)
         if (strncmp(scan, "esac", 4) == 0 &&
             (scan == p || isspace(*(scan - 1)) || *(scan - 1) == ';') &&
-            (scan[4] == '\0' || isspace(scan[4]) || scan[4] == ';')) {
+            (char_in_string(scan[4], "\0;") || isspace(scan[4]))) {
             case_depth--;
             if (case_depth == 0) {
                 esac_pos = scan;

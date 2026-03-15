@@ -13,6 +13,7 @@
 #include "config.h"
 #include "builtins.h"
 #include "expand.h"
+#include "utils.h"
 
 // Initialize completion
 void completion_init(void) {
@@ -386,7 +387,7 @@ CompletionResult *completion_generate(const char *line, size_t pos) {
     }
 
     // If it is first word and doesn't looks like a path, complete commands
-    if (is_first_word && !(word[0] == '.' || word[0] == '~' || strchr(word, '/') != NULL)) {
+    if (is_first_word && !(char_in_string(word[0], "~/") || strchr(word, '/') != NULL)) {
         complete_commands(result, word);
     } else {
         complete_files(result, word);

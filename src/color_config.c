@@ -5,6 +5,7 @@
 #include "color_config.h"
 #include "colors.h"
 #include "safe_string.h"
+#include "utils.h"
 
 // Global color configuration instance
 ColorConfig color_config;
@@ -175,11 +176,13 @@ int color_config_parse(const char *color_str, char *buf, size_t buf_size) {
 
     while (token != NULL) {
         // Trim leading whitespace
-        while (*token == ' ' || *token == '\t') token++;
+        while (char_in_string(*token, " \t")) {
+                token++;
+        }
 
         // Trim trailing whitespace
         size_t len = strlen(token);
-        while (len > 0 && (token[len-1] == ' ' || token[len-1] == '\t')) {
+        while (len > 0 && char_in_string(token[len-1], " \t")) {
             token[--len] = '\0';
         }
 

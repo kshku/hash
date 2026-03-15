@@ -23,6 +23,7 @@
 #include "shellvar.h"
 #include "ifs.h"
 #include "syslimits.h"
+#include "utils.h"
 
 // Global to store last exit code
 int last_command_exit_code = 0;
@@ -331,12 +332,16 @@ static bool is_redirection_arg(const char *arg) {
     }
 
     // Attached redirections: >file, <file, >>file, 2>file, etc.
-    if (arg[0] == '<' || arg[0] == '>') return true;
+    if (char_in_string(arg[0], "<>")) {
+        return true;
+    }
 
     // N>file, N>>file patterns
     const char *p = arg;
     while (*p && isdigit(*p)) p++;
-    if (p != arg && (*p == '>' || *p == '<')) return true;
+    if (p != arg && char_in_string(*p, "<>")) {
+        return true;
+    }
 
     return false;
 }

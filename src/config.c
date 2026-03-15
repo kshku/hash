@@ -16,6 +16,7 @@
 #include "varexpand.h"
 #include "expand.h"
 #include "cmdsub.h"
+#include "utils.h"
 
 Config shell_config;
 
@@ -199,7 +200,7 @@ static int handle_alias(char *line) {
     // Remove quotes if present
     size_t val_len = strlen(value);
     if (val_len >= 2 &&
-        (value[0] == '"' || value[0] == '\'') &&
+        char_in_string(value[0], "'\"") &&
         value[0] == value[val_len - 1]) {
         value[val_len - 1] = '\0';
         value++;
@@ -226,7 +227,7 @@ static int handle_export(char *line) {
     // Remove quotes if present
     size_t val_len = strlen(value);
     if (val_len >= 2 &&
-        (value[0] == '"' || value[0] == '\'') &&
+        char_in_string(value[0], "'\"") &&
         value[0] == value[val_len - 1]) {
         value[val_len - 1] = '\0';
         value++;
@@ -302,7 +303,7 @@ static int handle_set(char *line) {
         // Remove quotes if present
         size_t val_len = strlen(ps1_value);
         if (val_len >= 2 &&
-            (ps1_value[0] == '"' || ps1_value[0] == '\'') &&
+            char_in_string(ps1_value[0], "'\"") &&
             ps1_value[0] == ps1_value[val_len - 1]) {
             ps1_value[val_len - 1] = '\0';
             ps1_value++;
@@ -323,7 +324,7 @@ static int handle_set(char *line) {
             // Remove quotes if present
             size_t val_len = strlen(value);
             if (val_len >= 2 &&
-                (value[0] == '"' || value[0] == '\'') &&
+                char_in_string(value[0], "'\"") &&
                 value[0] == value[val_len - 1]) {
                 value[val_len - 1] = '\0';
                 value++;
@@ -367,7 +368,7 @@ int config_process_line(char *line) {
     line = trim_whitespace(line);
 
     // Skip empty lines and comments
-    if (line[0] == '\0' || line[0] == '#') {
+    if (char_in_string(line[0], "\0#")) {
         return 0;
     }
 

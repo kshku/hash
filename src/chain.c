@@ -17,6 +17,7 @@
 #include "script.h"
 #include "trap.h"
 #include "config.h"
+#include "utils.h"
 
 #define INITIAL_CHAIN_CAPACITY 8
 
@@ -535,16 +536,25 @@ int chain_execute(const CommandChain *chain) {
                 while (*check_pipe) {
                     // Skip fd number if present
                     while (isdigit(*check_pipe)) check_pipe++;
-                    if (*check_pipe == '<' || *check_pipe == '>') {
+                    if (char_in_string(*check_pipe, "<>")) {
                         // Skip the redirection operator
                         check_pipe++;
-                        if (*check_pipe == '>' || *check_pipe == '&') check_pipe++;
+                        if (char_in_string(*check_pipe, ">&")) {
+                            check_pipe++;
+                        }
                         // Skip whitespace
-                        while (*check_pipe && isspace(*check_pipe)) check_pipe++;
+                        while (*check_pipe && isspace(*check_pipe)) {
+                            check_pipe++;
+                        }
+
                         // Skip the filename
-                        while (*check_pipe && !isspace(*check_pipe) && *check_pipe != '|' &&
-                               *check_pipe != '<' && *check_pipe != '>') check_pipe++;
-                        while (*check_pipe && isspace(*check_pipe)) check_pipe++;
+                        while (*check_pipe && !isspace(*check_pipe) && !char_in_string(*check_pipe, "<|>")) {
+                            check_pipe++;
+                        }
+
+                        while (*check_pipe && isspace(*check_pipe)) {
+                            check_pipe++;
+                        }
                     } else {
                         break;
                     }

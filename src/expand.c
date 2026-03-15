@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include "expand.h"
 #include "safe_string.h"
+#include "utils.h"
 
 // Add \x01 markers before glob metacharacters to protect from glob expansion
 // Returns newly allocated string, caller must free
@@ -20,7 +21,7 @@ static char *protect_from_glob(const char *s) {
     size_t len = strlen(s);
     size_t extra = 0;
     for (const char *p = s; *p; p++) {
-        if (*p == '*' || *p == '?' || *p == '[' || *p == ']') {
+        if (char_in_string(*p, "*?[]")) {
             extra++;
         }
     }
@@ -33,7 +34,7 @@ static char *protect_from_glob(const char *s) {
     const char *read = s;
     char *write = result;
     while (*read) {
-        if (*read == '*' || *read == '?' || *read == '[' || *read == ']') {
+        if (char_in_string(*read, "*?[]")) {
             *write++ = '\x01';  // Protection marker
         }
         *write++ = *read++;
@@ -91,7 +92,7 @@ char *expand_tilde_path(const char *path) {
     const char *slash = NULL;
     const char *expansion = NULL;
 
-    if (path[1] == '+' && (path[2] == '/' || path[2] == '\0')) {
+    if (path[1] == '+' && char_in_string(path[2], "\0/")) {
         // ~+ expands to PWD
         expansion = getenv("PWD");
         if (!expansion) {
@@ -99,7 +100,7 @@ char *expand_tilde_path(const char *path) {
             expansion = getcwd(cwd, sizeof(cwd));
         }
         slash = path[2] == '/' ? path + 2 : NULL;
-    } else if (path[1] == '-' && (path[2] == '/' || path[2] == '\0')) {
+    } else if (path[1] == '-' && char_in_string(path[2], "\0/")) {
         // ~- expands to OLDPWD
         expansion = getenv("OLDPWD");
         if (!expansion) {
@@ -283,7 +284,7 @@ void strip_quote_markers(char *s) {
     const char *check = s;
     bool has_markers = false;
     while (*check) {
-        if (*check == '\x01' || *check == '\x03') {
+        if (char_in_string(*check, "\x01\x03")) {
             has_markers = true;
             break;
         }
@@ -339,7 +340,7 @@ static char *preprocess_bracket_expr(const char *s) {
             *write++ = *read++;
 
             // Check for negation
-            if (*read == '!' || *read == '^') {
+            if (char_in_string(*read, "!^")) {
                 *write++ = *read++;
             }
 
@@ -351,7 +352,7 @@ static char *preprocess_bracket_expr(const char *s) {
             // Process contents of bracket expression
             while (*read && *read != ']') {
                 // Check for collating element [.x.] or equivalence class [=x=]
-                if (*read == '[' && (*(read + 1) == '.' || *(read + 1) == '=')) {
+                if (*read == '[' && char_in_string(*(read + 1), ".=")) {
                     char delim = *(read + 1);  // . or =
                     const char *start = read + 2;  // Start of the element
 
@@ -449,7 +450,7 @@ static char **fnmatch_glob(const char *pattern, size_t *match_count) {
     // If not, just check if the file exists
     bool has_glob = false;
     for (const char *p = file_pattern; *p; p++) {
-        if (*p == '*' || *p == '?' || *p == '[') {
+        if (char_in_string(*p, "*?[")) {
             has_glob = true;
             break;
         }
@@ -568,7 +569,7 @@ int has_glob_chars(const char *s) {
             in_bracket = 1;
         } else if (*p == ']' && in_bracket) {
             return 1;  // Found a complete bracket expression
-        } else if (!in_bracket && (*p == '*' || *p == '?')) {
+        } else if (!in_bracket && char_in_string(*p, "*?")) {
             return 1;
         }
     }
@@ -596,7 +597,7 @@ static char *make_glob_pattern_ex(const char *s, bool do_preprocess) {
             read++;  // Skip marker
             char c = *read++;
             // Escape glob metacharacters with backslash
-            if (c == '*' || c == '?' || c == '[' || c == ']' || c == '\\') {
+            if (char_in_string(c, "*?[]\\")) {
                 *write++ = '\\';
             }
             *write++ = c;
@@ -640,7 +641,7 @@ static bool needs_fnmatch_glob(const char *s) {
             // Found opening bracket, look for [: inside
             p++;
             // Skip negation
-            if (*p == '!' || *p == '^') p++;
+            if (char_in_string(*p, "!^")) p++;
             // First ] is literal
             if (*p == ']') p++;
 
