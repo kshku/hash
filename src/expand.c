@@ -340,12 +340,12 @@ static char *preprocess_bracket_expr(const char *s) {
             *write++ = *read++;
 
             // Check for negation
-            if (char_in_string(*read, "!^")) {
+            if (*read && char_in_string(*read, "!^")) {
                 *write++ = *read++;
             }
 
             // First char after [ (or [! / [^) can be ] and it's literal
-            if (*read == ']') {
+            if (*read && *read == ']') {
                 *write++ = *read++;
             }
 
@@ -641,9 +641,9 @@ static bool needs_fnmatch_glob(const char *s) {
             // Found opening bracket, look for [: inside
             p++;
             // Skip negation
-            if (char_in_string(*p, "!^")) p++;
+            if (*p && char_in_string(*p, "!^")) p++;
             // First ] is literal
-            if (*p == ']') p++;
+            if (*p && *p == ']') p++;
 
             // Scan for [:
             while (*p && *p != ']') {
@@ -652,6 +652,7 @@ static bool needs_fnmatch_glob(const char *s) {
                 }
                 p++;
             }
+            if (!*p) break;
         }
     }
     return false;
