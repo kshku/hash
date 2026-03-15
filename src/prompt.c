@@ -12,6 +12,7 @@
 #include "cmdsub.h"
 #include "varexpand.h"
 #include "jobs.h"
+#include "utils.h"
 
 PromptConfig prompt_config;
 
@@ -146,24 +147,6 @@ char *prompt_get_hostname(void) {
     }
 
     return NULL;
-}
-
-// Safe append helper - explicitly bounds-checked for static analyzers
-static size_t safe_append(char *output, size_t out_pos, size_t max_pos, const char *str) {
-    if (!str || out_pos >= max_pos) {
-        return out_pos;
-    }
-
-    size_t available = max_pos - out_pos;
-    size_t len = strlen(str);
-    size_t to_copy = (len < available) ? len : available;
-
-    if (to_copy > 0 && out_pos + to_copy <= max_pos) {
-        memcpy(output + out_pos, str, to_copy);
-        return out_pos + to_copy;
-    }
-
-    return out_pos;
 }
 
 static size_t handle_directories(char c, char *output, size_t out_pos, size_t max_pos, const char *base_color) {
@@ -335,7 +318,7 @@ static void handle_dynamic_expansion(char *prompt, const char *ps1, int last_exi
 
         // Strip trailing whitespace from the last line (but keep the newline structure)
         size_t plen = strlen(prompt);
-        while (plen > 0 && (prompt[plen-1] == ' ' || prompt[plen-1] == '\t')) {
+        while (plen > 0 && char_in_string(prompt[plen-1], " \t")) {
             prompt[--plen] = '\0';
         }
 

@@ -5,6 +5,7 @@
 #include "hash.h"
 #include "parser.h"
 #include "lineedit.h"
+#include "utils.h"
 
 typedef struct {
     int bufsize;
@@ -46,23 +47,13 @@ static void mark_and_write_char(Parser *parser) {
     *parser->write_pos++ = *parser->read_pos++;
 }
 
-static bool char_in_string(char c, const char *str) {
-    for (int i = 0; str[i]; ++i) {
-        if (c == str[i]) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 static void handle_backslash(Parser *parser) {
     // In single quotes, backslash has NO special meaning - treat as regular char
     // BUT we need to mark it so varexpand doesn't process it
     if (parser->in_single_quote) {
         /* Add marker before backslash if next char is $, `, or \
            so varexpand knows this is literal and not an escape sequence */
-        if (*(parser->read_pos + 1) == '$' || *(parser->read_pos + 1) == '`' || *(parser->read_pos + 1) == '\\') {
+        if (char_in_string(*(parser->read_pos + 1), "$`\\")) {
             mark_and_write_char(parser); // Marker for literal backslash
             return;
         }

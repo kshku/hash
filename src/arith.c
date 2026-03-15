@@ -14,6 +14,7 @@
 #include "shellvar.h"
 #include "jobs.h"
 #include "config.h"
+#include "utils.h"
 
 // Forward declaration to access positional parameters
 // (We can't include script.h due to TokenType name collision)
@@ -221,9 +222,10 @@ static void set_variable(const char *name, long value) {
 }
 
 static bool is_special_variable(char c) {
-    if (c == '$' || c == '?' || c == '!' || c == '#'
-            || c == '@' || c == '*' || c == '-' || c == '0')
+    if (char_in_string(c, "$?!#@*-0")) {
         return true;
+    }
+
     return false;
 }
 
@@ -303,7 +305,7 @@ static void next_token(Parser *p) {
     }
 
     // Variable names (or starting with $)
-    if (isalpha(c) || c == '_' || c == '$') {
+    if (isalpha(c) || char_in_string(c, "_$")) {
         get_variable_token(p);
         return;
     }

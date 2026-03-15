@@ -2,6 +2,7 @@
 #include <ctype.h>
 #include "danger.h"
 #include "safe_string.h"
+#include "utils.h"
 
 // Check if string contains a pattern (case-insensitive word boundary check)
 static int contains_pattern(const char *str, const char *pattern) {
@@ -33,11 +34,11 @@ static DangerLevel check_rm_danger(const char *args) {
         (strlen(args) > 0 && args[strlen(args)-1] == '/' && !strchr(args + 1, '/'))) {
         // Check if it's literally just "/" at the end
         const char *slash = strrchr(args, '/');
-        if (slash && (slash[1] == '\0' || slash[1] == ' ' || slash[1] == '*')) {
+        if (slash && char_in_string(slash[1], "\0 *")) {
             // Check it's not a subdirectory
             const char *p = args;
             while (*p && (*p == '-' || isalpha(*p) || isspace(*p))) p++;
-            if (*p == '/' && (p[1] == '\0' || p[1] == ' ' || p[1] == '*')) {
+            if (*p == '/' && char_in_string(p[1], "\0 *")) {
                 return DANGER_HIGH;
             }
         }
@@ -54,14 +55,14 @@ static DangerLevel check_rm_danger(const char *args) {
     // Look for standalone . or ./ (not ./subdir)
     const char *p = args;
     while (*p) {
-        if ((*p == ' ' || *p == '\t') && p[1] == '.') {
+        if (char_in_string(*p, " \t") && p[1] == '.') {
             // Check for "." alone
-            if (p[2] == '\0' || p[2] == ' ' || p[2] == '\t') {
+            if (char_in_string(p[2], "\0 \t")) {
                 return DANGER_HIGH;
             }
             // Check for "./" with nothing after (or just trailing space)
             if (p[2] == '/') {
-                if (p[3] == '\0' || p[3] == ' ' || p[3] == '\t') {
+                if (char_in_string(p[3], "\0 \t")) {
                     return DANGER_HIGH;
                 }
                 // "./something" is ok - skip

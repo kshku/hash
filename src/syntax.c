@@ -9,6 +9,7 @@
 #include "config.h"
 #include "safe_string.h"
 #include "danger.h"
+#include "utils.h"
 
 // Command cache for performance
 #define CMD_CACHE_SIZE 128
@@ -101,12 +102,12 @@ static void add_segment(SyntaxResult *result, size_t start, size_t end, SyntaxTo
 
 // Check if character is an operator character
 static bool is_operator_char(char c) {
-    return c == '|' || c == '&' || c == ';';
+    return char_in_string(c, "|&;");
 }
 
 // Check if character starts a redirection
 static bool is_redirect_char(char c) {
-    return c == '>' || c == '<';
+    return char_in_string(c, "<>");
 }
 
 // Analyze input and return syntax segments
@@ -125,7 +126,7 @@ SyntaxResult *syntax_analyze(const char *input, size_t len) {
 
     while (i < len) {
         // Skip whitespace
-        while (i < len && (input[i] == ' ' || input[i] == '\t')) {
+        while (i < len && char_in_string(input[i], " \t")) {
             i++;
         }
         if (i >= len) break;
@@ -165,7 +166,7 @@ SyntaxResult *syntax_analyze(const char *input, size_t len) {
             if (i < len && is_redirect_char(input[i])) {
                 i++;
                 // Handle >> or <<
-                if (i < len && (input[i] == '>' || input[i] == '<')) i++;
+                if (i < len && char_in_string(input[i], "<>")) i++;
                 // Handle &1 in 2>&1
                 if (i < len && input[i] == '&') {
                     i++;
@@ -229,9 +230,7 @@ SyntaxResult *syntax_analyze(const char *input, size_t len) {
                     }
                 } else {
                     // $VAR or special: $?, $$, $!, $#, $@, $*, $0-$9
-                    if (input[i] == '?' || input[i] == '$' || input[i] == '!' ||
-                        input[i] == '#' || input[i] == '@' || input[i] == '*' ||
-                        isdigit(input[i])) {
+                    if (char_in_string(input[i], "?$!#@*") || isdigit(input[i])) {
                         i++;
                     } else {
                         // Regular variable name
@@ -245,7 +244,7 @@ SyntaxResult *syntax_analyze(const char *input, size_t len) {
         }
 
         // Glob characters when standalone
-        if (input[i] == '*' || input[i] == '?') {
+        if (char_in_string(input[i], "*?")) {
             i++;
             add_segment(result, start, i, SYN_GLOB);
             at_command_pos = false;
@@ -289,7 +288,7 @@ SyntaxResult *syntax_analyze(const char *input, size_t len) {
                     // Check if word contains glob characters
                     bool has_glob = false;
                     for (size_t j = 0; j < word_len; j++) {
-                        if (word[j] == '*' || word[j] == '?' || word[j] == '[') {
+                        if (char_in_string(word[j], "*?[")) {
                             has_glob = true;
                             break;
                         }

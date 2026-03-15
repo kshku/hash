@@ -125,3 +125,22 @@ void safe_trim(char *str) {
         memmove(str, start, end - start + 2);  // +2 for char and null
     }
 }
+
+// Safe append helper - explicitly bounds-checked for static analyzers
+size_t safe_append(char *output, size_t out_pos, size_t max_pos, const char *str) {
+    if (!output || !str || out_pos >= max_pos) {
+        return out_pos;
+    }
+
+    size_t available = max_pos - out_pos;
+    size_t len = strlen(str);
+    size_t to_copy = (len < available) ? len : available;
+
+    if (to_copy > 0 && out_pos + to_copy <= max_pos) {
+        memcpy(output + out_pos, str, to_copy);
+        return out_pos + to_copy;
+    }
+
+    return out_pos;
+}
+

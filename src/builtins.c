@@ -31,6 +31,7 @@
 #include "update.h"
 #include "shellvar.h"
 #include "trap.h"
+#include "utils.h"
 
 extern int last_command_exit_code;
 
@@ -89,7 +90,7 @@ static int parse_job_id(const char *arg) {
 
     if (*arg == '%') {
         arg++;
-        if (*arg == '%' || *arg == '+' || *arg == '\0') {
+        if (char_in_string(*arg, "\0%+")) {
             return 0;
         } else if (*arg == '-') {
             return 0;
@@ -217,7 +218,7 @@ int shell_alias(char **args) {
         const char *name = args[1];
         char *value = equals + 1;
 
-        if ((value[0] == '"' || value[0] == '\'') &&
+        if (char_in_string(value[0], "'\"") &&
             value[0] == value[strlen(value) - 1]) {
             value[strlen(value) - 1] = '\0';
             value++;
@@ -526,7 +527,7 @@ static bool handle_hash_shell_options(const char *arg) {
         // Remove quotes if present
         size_t val_len = strlen(ps1_value);
         if (val_len >= 2 &&
-            (ps1_value[0] == '"' || ps1_value[0] == '\'') &&
+            char_in_string(ps1_value[0], "'\"") &&
             ps1_value[0] == ps1_value[val_len - 1]) {
             // Make a mutable copy to remove quotes
             char *temp = strdup(ps1_value);
@@ -568,7 +569,7 @@ int shell_set(char **args) {
 
         // POSIX: If argument doesn't start with - or +, and isn't an option=value,
         // treat it and all following arguments as positional parameters
-        if (arg[0] != '-' && arg[0] != '+' && !strchr(arg, '=')) {
+        if (!char_in_string(arg[0], "-+") && !strchr(arg, '=')) {
             // arguments from this point are used as positional arguments
             handle_positional_arguments(&args[i]);
             return 1;
@@ -1291,11 +1292,11 @@ static bool check_has_command(char **args) {
         const char *p = arg;
         while (*p && isdigit(*p)) p++;
 
-        if (*p == '<' || *p == '>') {
+        if (char_in_string(*p, "<>")) {
             is_redir = true;
         } else if (p == arg) {
             // No digit prefix, check for bare redirection
-            if (*p == '<' || *p == '>') {
+            if (char_in_string(*p, "<>")) {
                 is_redir = true;
             }
         }
@@ -1765,7 +1766,7 @@ int shell_wait(char **args) {
         // Check for job ID (%n)
         if (arg[0] == '%') {
             const Job *job = NULL;
-            if (arg[1] == '%' || arg[1] == '+' || arg[1] == '\0') {
+            if (char_in_string(arg[1], "\0%+")) {
                 // %%, %+, or just % - current job
                 job = jobs_get_current();
             } else {
@@ -1899,7 +1900,7 @@ static int process_each_target(char **args, int start_idx, int sig) {
             }
 
             const Job *job = NULL;
-            if (target[1] == '%' || target[1] == '+' || target[1] == '\0') {
+            if (char_in_string(target[1], "\0%+")) {
                 // %%, %+, or just % - current job
                 job = jobs_get_current();
             } else if (target[1] == '-') {

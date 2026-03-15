@@ -21,6 +21,7 @@
 #include "colors.h"
 #include "safe_string.h"
 #include "execute.h"
+#include "utils.h"
 
 // State file for tracking last update check
 #define UPDATE_STATE_FILE ".hash_update_state"
@@ -275,8 +276,8 @@ int update_compare_versions(const char *v1, const char *v2) {
     // Also handles "v18", "v19"
 
     // Skip 'v' prefix if present
-    if (v1[0] == 'v' || v1[0] == 'V') v1++;
-    if (v2[0] == 'v' || v2[0] == 'V') v2++;
+    if (char_in_string(v1[0], "vV")) v1++;
+    if (char_in_string(v2[0], "vV")) v2++;
 
     int n1 = atoi(v1);
     int n2 = atoi(v2);
@@ -370,7 +371,7 @@ static int extract_json_string(const char *json, const char *key, char *value, s
     p += strlen(search);
 
     // Skip whitespace
-    while (*p && (*p == ' ' || *p == '\t' || *p == '\n')) p++;
+    while (*p && char_in_string(*p, " \t\n")) p++;
 
     if (*p != '"') return -1;
     p++;  // Skip opening quote
@@ -724,7 +725,7 @@ void update_startup_check(void) {
 
     // Check if updates are disabled via environment variable
     const char *disabled = getenv("HASH_DISABLE_UPDATE_CHECK");
-    if (disabled && (disabled[0] == '1' || disabled[0] == 'y' || disabled[0] == 'Y')) {
+    if (disabled && char_in_string(disabled[0], "1yY")) {
         return;
     }
 

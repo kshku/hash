@@ -14,6 +14,7 @@
 #include "script.h"
 #include "trap.h"
 #include "hash.h"
+#include "utils.h"
 
 #define INITIAL_BUF_SIZE 65536
 
@@ -51,9 +52,11 @@ static void cmdsub_buf_putc(CmdSubBuf *buf, char c) {
 // Helper to check if a character needs protection in quoted context
 // This includes glob chars, redirect operators, quote chars, and other special chars
 static int needs_quote_protection(char c) {
-    return c == '*' || c == '?' || c == '[' ||  // glob chars
-           c == '<' || c == '>' || c == '|' || c == '&' ||  // redirect/pipe operators
-           c == '"' || c == '\'' || c == '\\' || c == '~';  // quotes, backslash, tilde
+    return char_in_string(c,
+            "*?[" // glob chars
+            "<>|&" // redirect/pipe operators
+            "\"'\\~" // quotes, backslash, tilde
+            );
 }
 
 // Track exit code from last command substitution
@@ -219,7 +222,7 @@ static int has_cmdsub(const char *str) {
     const char *p = str;
     while (*p) {
         // Check for SOH marker with protected backslash (from single quotes: \$ or \`)
-        if (*p == '\x01' && *(p + 1) == '\\' && (*(p + 2) == '$' || *(p + 2) == '`')) {
+        if (*p == '\x01' && *(p + 1) == '\\' && char_in_string(*(p + 2), "$`")) {
             return 1;
         }
         // Check for SOH marker (single-quoted dollar sign)
@@ -227,7 +230,7 @@ static int has_cmdsub(const char *str) {
             return 1;
         }
         if (*p == '\\' && *(p + 1)) {
-            if (*(p + 1) == '$' || *(p + 1) == '`') {
+            if (char_in_string(*(p + 1), "$`")) {
                 return 1;
             }
             p += 2;
@@ -278,7 +281,7 @@ static int process_substitution(const char *cmd_start, size_t cmd_len,
         }
         for (size_t i = 0; i < output_len; i++) {
             char c = output[i];
-            if (c == '$' || c == '`') {
+            if (char_in_string(c, "$`")) {
                 // Always protect $ and ` from further expansion
                 // (POSIX: command substitution output is not re-scanned
                 // for variable expansion or nested command substitution)
@@ -311,7 +314,7 @@ static bool handle_soh_marker(const char **read_char, CmdSubBuf *buf) {
 
     // Handle SOH marker with protected backslash (from single quotes: \$ or \`)
     // Pass through to varexpand which will output \$ or \` literally
-    if (*p == '\x01' && *(p + 1) == '\\' && (*(p + 2) == '$' || *(p + 2) == '`')) {
+    if (*p == '\x01' && *(p + 1) == '\\' && char_in_string(*(p + 2), "$`")) {
         if (cmdsub_buf_ensure(buf, 3) == 0) {
             buf->data[buf->len++] = *p++;  // marker
             buf->data[buf->len++] = *p++;  // backslash
@@ -413,7 +416,7 @@ char *cmdsub_expand(const char *str) {
 
         // Handle escape sequences
         if (*p == '\\' && *(p + 1)) {
-            if (*(p + 1) == '$' || *(p + 1) == '`') {
+            if (char_in_string(*(p + 1), "$`")) {
                 // Escaped $ or ` - preserve the escape for varexpand to handle
                 if (cmdsub_buf_ensure(&buf, 2) == 0) {
                     buf.data[buf.len++] = '\\';

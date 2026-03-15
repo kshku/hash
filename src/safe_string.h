@@ -52,4 +52,16 @@ int safe_strcmp(const char *s1, const char *s2, size_t maxlen);
  */
 void safe_trim(char *str);
 
+/**
+ * Safe string append with explicit bounds checking.
+ *
+ * @param output The output buffer
+ * @param out_pos Position to append
+ * @param max_pos Last writable index
+ * @param str The string to append
+ *
+ * @return Next write position
+ */
+size_t safe_append(char *output, size_t out_pos, size_t max_pos, const char *str);
+
 #endif // SAFE_STRING_H

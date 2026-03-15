@@ -12,6 +12,7 @@
 #include "config.h"
 #include "shellvar.h"
 #include "ifs.h"
+#include "utils.h"
 
 #define MAX_EXPANDED_LENGTH 8192
 
@@ -116,7 +117,7 @@ char *varexpand_expand(const char *str, int last_exit_code) {
             result[out_pos++] = '\\';
             p += 3;
             continue;
-        } else if (*p == '\x01' && *(p + 1) == '\\' && (*(p + 2) == '$' || *(p + 2) == '`')) {
+        } else if (*p == '\x01' && *(p + 1) == '\\' && char_in_string(*(p + 2), "$`")) {
             // Protected backslash from single quotes - output \$ or \` literally
             result[out_pos++] = '\\';
             result[out_pos++] = *(p + 2);
@@ -128,7 +129,7 @@ char *varexpand_expand(const char *str, int last_exit_code) {
             result[out_pos++] = '\\';
             p += 2;
             continue;
-        } else if ((*p == '\x01' || *p == '\\') && *(p + 1) == '$') {
+        } else if (char_in_string(*p, "\x01\\") && *(p + 1) == '$') {
             // Single-quoted or escaped dollar sign - output $ literally (no expansion)
             result[out_pos++] = '$';
             p += 2;
@@ -281,11 +282,10 @@ char *varexpand_expand(const char *str, int last_exit_code) {
                     p++;
                 }
 
-                if (*p == '-' || *p == '+' || *p == '=' || *p == '?' ||
-                    *p == '#' || *p == '%') {
+                if (char_in_string(*p, "-+=?#%")) {
                     modifier = *p++;
                     // Check for ## or %%
-                    if ((modifier == '#' || modifier == '%') && *p == modifier) {
+                    if (char_in_string(modifier, "#%") && *p == modifier) {
                         double_modifier = true;
                         p++;
                     }
@@ -572,8 +572,7 @@ append_value:
                         // Append with markers to prevent glob expansion and quote interpretation
                         for (size_t i = 0; i < val_len && out_pos < result_size - 2; i++) {
                             char c = var_value[i];
-                            if (c == '*' || c == '?' || c == '[' || c == ']' || c == '"' || c == '\'' || c == '\\' ||
-                                c == '<' || c == '>' || c == '|' || c == '&' || c == '~') {
+                            if (char_in_string(c, "*?[]'\"\\<|>&~")) {
                                 // Add marker before special characters (globs, quotes, redirects, operators, tilde, bracket close)
                                 result[out_pos++] = '\x01';
                             }

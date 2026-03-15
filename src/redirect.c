@@ -13,6 +13,7 @@
 #include "cmdsub.h"
 #include "varexpand.h"
 #include "execute.h"
+#include "utils.h"
 
 #define MAX_REDIRECTS 16
 
@@ -222,7 +223,7 @@ RedirInfo *redirect_parse(char **args) {
             const char *p = arg;
             while (*p && isdigit(*p)) p++;
 
-            if (*p == '>' || *p == '<') {
+            if (char_in_string(*p, "<>")) {
                 int fd = atoi(arg);
                 if (*p == '<') {
                     p++;
@@ -567,7 +568,7 @@ char *redirect_get_heredoc_delim(const char *line, int *strip_tabs, int *quoted)
                 char quote_char = 0;
 
                 // Check if delimiter is quoted
-                if (*p == '\'' || *p == '"') {
+                if (char_in_string(*p, "'\"")) {
                     quote_char = *p;
                     *quoted = 1;  // Mark as quoted - no expansion
                     p++;  // Skip opening quote
